@@ -786,11 +786,13 @@ fn make_cube() -> MeshData {
     let h = 0.5;
     let uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
     for (n, u, v) in faces {
+        // Each face lives on its own side of the cube: centre = normal * half-size.
+        let center = [n[0] * h, n[1] * h, n[2] * h];
         let corners = [
-            mul_add([0.0; 3], u, -h, v, -h),
-            mul_add([0.0; 3], u, h, v, -h),
-            mul_add([0.0; 3], u, h, v, h),
-            mul_add([0.0; 3], u, -h, v, h),
+            mul_add(center, u, -h, v, -h),
+            mul_add(center, u, h, v, -h),
+            mul_add(center, u, h, v, h),
+            mul_add(center, u, -h, v, h),
         ];
         push_quad(&mut out, n, corners, uv);
     }
@@ -975,6 +977,27 @@ fn make_torus() -> MeshData {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod primitive_tests {
+    use super::*;
+
+    #[test]
+    fn cube_is_a_real_closed_unit_box() {
+        let cube = make_cube();
+        assert_eq!(cube.positions.len(), 24);
+        assert_eq!(cube.normals.len(), 24);
+        assert_eq!(cube.indices.len(), 36);
+        for axis in 0..3 {
+            let min = cube.positions.iter().map(|p| p[axis]).fold(f32::INFINITY, f32::min);
+            let max = cube.positions.iter().map(|p| p[axis]).fold(f32::NEG_INFINITY, f32::max);
+            assert!((min + 0.5).abs() < 1e-5, "axis {axis} min was {min}");
+            assert!((max - 0.5).abs() < 1e-5, "axis {axis} max was {max}");
+        }
+        // Every vertex must lie on one of the six faces at +/-0.5, not at the origin.
+        assert!(cube.positions.iter().all(|p| p.iter().any(|v| v.abs() > 0.49)));
+    }
 }
 
 pub fn make_primitive(kind: PrimitiveKind) -> MeshData {
