@@ -2,7 +2,7 @@ name: Build Release Binaries
 
 on:
   push:
-    branches: [main]
+    branches: [main, test]
   workflow_dispatch:
 
 jobs:
@@ -39,6 +39,9 @@ jobs:
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
+
+      - name: Run unit tests
+        run: cargo test --locked
 
       - name: Build release binary
         run: cargo build --release --locked

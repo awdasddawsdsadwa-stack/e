@@ -51,14 +51,23 @@ Example MCP handshake:
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_scene_hierarchy","arguments":{}}}
 ```
 
-Phase 1 tools: `get_scene_hierarchy`, `spawn_primitive`, `transform_object`, `undo`, `redo`.
-Each line of stdout is one compact JSON-RPC response; logs go to stderr.
+Available tools: `get_scene_hierarchy`, `spawn_primitive`, `transform_object`,
+`create_custom_mesh`, `modify_mesh`, `apply_material`, `generate_procedural_texture`,
+`undo`, `redo`. Each line of stdout is one compact JSON-RPC response; logs go to stderr.
+
+## Dynamic GPU adaptation
+
+At startup Forge scans the OpenGL version, renderer string and maximum texture size
+through glow. It never requests features beyond OpenGL 3.3, but it clamps every texture
+upload to the smaller of 1024px and the driver's reported limit, and reports the detected
+profile in the top bar. This keeps the UI on the maintained `egui` backend for legacy
+drivers rather than switching to an unmaintained WGPU-based GUI crate.
 
 ## Roadmap
 
 - **Phase 1** (current): OpenGL 3.3 window, orbit/pan/zoom camera, grid floor, egui shell
   (Outliner / Inspector / Timeline), undo/redo foundation, stdio MCP server with
   `spawn_primitive`, `transform_object` and `get_scene_hierarchy`.
-- **Phase 2**: Custom meshes, auto-UV box projection, image/procedural textures, shading modes.
+- **Phase 2** (current): Custom meshes, auto-UV box projection, image/procedural textures, shading modes.
 - **Phase 3**: Armatures, bones, auto-skinning, pose mode.
 - **Phase 4**: Keyframe timeline, glTF/GLB import/export, viewport snapshot feedback.

@@ -165,7 +165,7 @@ fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "get_scene_hierarchy",
-            "description": "Return the full scene graph: every node with its transform, material, geometry summary, visibility and parent, plus the current timeline state. Use this to verify what is in the scene.",
+            "description": "Return the full scene graph: every node with its transform, material, geometry summary, visibility and parent. The current timeline state is available both at the top-level 'timeline' key and at 'scene.timeline'. Use this to verify what is in the scene.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -174,7 +174,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "spawn_primitive",
-            "description": "Spawn a procedural primitive mesh into the scene and select it.",
+            "description": "Spawn a procedural primitive mesh into the scene and select it. The new node becomes the current selection, so later tools may omit id/name to target it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -224,6 +224,99 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "create_custom_mesh",
+            "description": "Create a mesh from raw vertex buffers. Supply positions ([[x,y,z], ...]) and triangle indices (flat list of vertex indices, length divisible by 3). Normals and UVs are optional. With auto_uv=true, box-projection UVs are generated automatically.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "positions": {
+                        "type": "array",
+                        "items": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                    },
+                    "normals": {
+                        "type": "array",
+                        "items": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                    },
+                    "uvs": {
+                        "type": "array",
+                        "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }
+                    },
+                    "indices": { "type": "array", "items": { "type": "integer" } },
+                    "auto_uv": { "type": "boolean", "description": "Generate box-projection UVs (default true)." },
+                    "base_color": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 }
+                },
+                "required": ["positions", "indices"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "modify_mesh",
+            "description": "Apply a modeling operation to a mesh: extrude along an axis, subdivide triangles, merge another mesh, recalculate smooth normals, or delete triangles.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "operation": {
+                        "type": "string",
+                        "enum": ["extrude", "subdivide", "merge", "recalculate_normals", "delete_faces"]
+                    },
+                    "direction": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "distance": { "type": "number" },
+                    "levels": { "type": "integer", "description": "Subdivision levels (1-3)." },
+                    "source_id": { "type": "integer", "description": "Mesh to merge into the target." },
+                    "faces": { "type": "array", "items": { "type": "integer" }, "description": "Triangle indices to delete." }
+                },
+                "required": ["operation"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "apply_material",
+            "description": "Set PBR properties on a mesh and optionally load a PNG/JPG texture from disk. Textures are downscaled to the GPU-safe limit before upload. Target by id or name; selection is unchanged.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "base_color": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+                    "roughness": { "type": "number" },
+                    "metallic": { "type": "number" },
+                    "texture_path": { "type": "string", "description": "Path to a .png/.jpg image." },
+                    "slot": {
+                        "type": "string",
+                        "enum": ["albedo", "roughness", "normal"],
+                        "description": "Which texture slot to write (default albedo)."
+                    }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "generate_procedural_texture",
+            "description": "Generate a deterministic RGBA8 texture (checkerboard, value noise, wood, brick, gradient or metallic scratches) and assign it to a mesh texture slot. Target by id or name; selection is unchanged. The response echoes all generation arguments.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "pattern": {
+                        "type": "string",
+                        "enum": ["checkerboard", "value_noise", "wood", "brick", "gradient", "scratches"]
+                    },
+                    "size": { "type": "integer", "description": "Square size in pixels; clamped to the GPU-safe limit." },
+                    "color_a": { "type": "array", "items": { "type": "integer" }, "minItems": 4, "maxItems": 4 },
+                    "color_b": { "type": "array", "items": { "type": "integer" }, "minItems": 4, "maxItems": 4 },
+                    "scale": { "type": "number" },
+                    "seed": { "type": "integer" },
+                    "slot": { "type": "string", "enum": ["albedo", "roughness", "normal"] }
+                },
+                "required": ["pattern"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "undo",
             "description": "Revert the most recent scene mutation.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
@@ -248,7 +341,17 @@ async fn call_tool(params: Value, tx: &CommandSender) -> Result<Value, (i64, Str
         return Err((-32602, "tool arguments must be an object".into()));
     }
 
-    let known = ["get_scene_hierarchy", "spawn_primitive", "transform_object", "undo", "redo"];
+    let known = [
+        "get_scene_hierarchy",
+        "spawn_primitive",
+        "transform_object",
+        "create_custom_mesh",
+        "modify_mesh",
+        "apply_material",
+        "generate_procedural_texture",
+        "undo",
+        "redo",
+    ];
     if !known.contains(&name.as_str()) {
         return Ok(tool_error(&format!("Unknown tool: {name}")));
     }
