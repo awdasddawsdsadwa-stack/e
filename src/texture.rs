@@ -357,7 +357,13 @@ pub fn generate(pattern: Pattern, size: u32, options: &TextureOptions) -> Textur
     };
 
     TextureData {
-        name: format!("procedural_{}", pattern.as_str()),
+        name: format!(
+            "procedural_{}_{}x{}_seed{}",
+            pattern.as_str(),
+            size,
+            size,
+            options.seed
+        ),
         width: size,
         height: size,
         pixels,

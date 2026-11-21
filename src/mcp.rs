@@ -165,7 +165,7 @@ fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "get_scene_hierarchy",
-            "description": "Return the full scene graph: every node with its transform, material, geometry summary, visibility and parent, plus the current timeline state. Use this to verify what is in the scene.",
+            "description": "Return the full scene graph: every node with its transform, material, geometry summary, visibility and parent. The current timeline state is available both at the top-level 'timeline' key and at 'scene.timeline'. Use this to verify what is in the scene.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -174,7 +174,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "spawn_primitive",
-            "description": "Spawn a procedural primitive mesh into the scene and select it.",
+            "description": "Spawn a procedural primitive mesh into the scene and select it. The new node becomes the current selection, so later tools may omit id/name to target it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -274,7 +274,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "apply_material",
-            "description": "Set PBR properties on a mesh and optionally load a PNG/JPG texture from disk. Textures are downscaled to the GPU-safe limit before upload.",
+            "description": "Set PBR properties on a mesh and optionally load a PNG/JPG texture from disk. Textures are downscaled to the GPU-safe limit before upload. Target by id or name; selection is unchanged.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -295,7 +295,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "generate_procedural_texture",
-            "description": "Generate a deterministic RGBA8 texture (checkerboard, value noise, wood, brick, gradient or metallic scratches) and assign it to a mesh texture slot.",
+            "description": "Generate a deterministic RGBA8 texture (checkerboard, value noise, wood, brick, gradient or metallic scratches) and assign it to a mesh texture slot. Target by id or name; selection is unchanged. The response echoes all generation arguments.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

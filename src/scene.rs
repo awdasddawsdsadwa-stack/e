@@ -266,12 +266,11 @@ impl SceneNode {
             NodeKind::Empty | NodeKind::Camera => base,
             NodeKind::Mesh { mesh, material, primitive } => {
                 let mut v = base;
-                let mut mat = material.summary_json();
-                mat["primitive"] = json!(primitive.map(|p| p.as_str()));
-                v["material"] = mat;
+                v["material"] = material.summary_json();
                 v["geometry"] = json!({
                     "vertices": mesh.positions.len(),
                     "triangles": mesh.indices.len() / 3,
+                    "primitive": primitive.map(|p| p.as_str()),
                 });
                 v
             }
@@ -584,20 +583,22 @@ impl Scene {
 
     pub fn hierarchy_json(&self) -> Value {
         let nodes: Vec<Value> = self.nodes.iter().map(|n| n.to_json()).collect();
+        let timeline = json!({
+            "frame": self.timeline.frame,
+            "frame_start": self.timeline.frame_start,
+            "frame_end": self.timeline.frame_end,
+            "fps": self.timeline.fps,
+            "playing": self.timeline.playing,
+        });
         json!({
             "scene": {
                 "node_count": self.nodes.len(),
                 "selected": self.selected,
                 "background": self.background,
                 "nodes": nodes,
+                "timeline": timeline.clone(),
             },
-            "timeline": {
-                "frame": self.timeline.frame,
-                "frame_start": self.timeline.frame_start,
-                "frame_end": self.timeline.frame_end,
-                "fps": self.timeline.fps,
-                "playing": self.timeline.playing,
-            },
+            "timeline": timeline,
         })
     }
 }

@@ -410,7 +410,11 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
             match summary {
                 Some(value) => {
                     scene.revision += 1;
-                    Ok(json!({ "id": id, "material": value }))
+                    Ok(json!({
+                        "id": id,
+                        "name": scene.node(id).map(|n| n.name.clone()).unwrap_or_default(),
+                        "material": value,
+                    }))
                 }
                 None => Err("Node is not a mesh".into()),
             }
@@ -472,7 +476,18 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
             };
             if assigned {
                 scene.revision += 1;
-                Ok(json!({ "id": id, "slot": slot, "texture": summary }))
+                Ok(json!({
+                    "id": id,
+                    "name": scene.node(id).map(|n| n.name.clone()).unwrap_or_default(),
+                    "slot": slot,
+                    "pattern": pattern_name,
+                    "size": size,
+                    "color_a": options.color_a,
+                    "color_b": options.color_b,
+                    "scale": options.scale,
+                    "seed": options.seed,
+                    "texture": summary,
+                }))
             } else {
                 Err("Node is not a mesh".into())
             }
