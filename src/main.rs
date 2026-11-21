@@ -278,8 +278,13 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
                 return_fail(command, "Node not found");
                 return;
             };
-            let op = command.params.get("operation").and_then(Value::as_str).unwrap_or("");
-            let outcome: Result<(), String> = match op {
+            let op = command
+                .params
+                .get("operation")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let outcome: Result<(), String> = match op.as_str() {
                 "extrude" => {
                     let direction = parse_array3(command.params.get("direction"))
                         .unwrap_or([0.0, 1.0, 0.0]);
@@ -363,7 +368,12 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
                 return_fail(command, "Node is not a mesh");
                 return;
             }
-            let slot = command.params.get("slot").and_then(Value::as_str).unwrap_or("albedo");
+            let slot = command
+                .params
+                .get("slot")
+                .and_then(Value::as_str)
+                .unwrap_or("albedo")
+                .to_string();
             let path = command.params.get("texture_path").and_then(Value::as_str).map(str::to_string);
             let loaded = match path {
                 Some(path) => match texture::from_image_file(&path, None) {
@@ -392,7 +402,7 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
                         material.metallic = metallic.clamp(0.0, 1.0) as f32;
                     }
                     if let Some(tex) = loaded {
-                        assign_texture(material, slot, tex);
+                        assign_texture(material, &slot, tex);
                     }
                     summary = Some(material.summary_json());
                 }
@@ -415,8 +425,13 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
                 return_fail(command, "Node is not a mesh");
                 return;
             }
-            let pattern_name = command.params.get("pattern").and_then(Value::as_str).unwrap_or("");
-            let pattern = match pattern_name {
+            let pattern_name = command
+                .params
+                .get("pattern")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let pattern = match pattern_name.as_str() {
                 "checkerboard" => TexturePattern::Checkerboard,
                 "value_noise" => TexturePattern::ValueNoise,
                 "wood" => TexturePattern::Wood,
