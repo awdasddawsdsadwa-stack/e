@@ -317,6 +317,92 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "render_viewport_snapshot",
+            "description": "Render the current scene from the editor camera and return a resized PNG as an image content block (base64). Use this to visually inspect your own work and catch mistakes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "width": { "type": "integer", "description": "Pixel width, clamped to 64..1024 (default 512)." },
+                    "height": { "type": "integer", "description": "Pixel height, clamped to 64..1024 (default = width)." }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "build_model",
+            "description": "Build a whole model in ONE call from a list of parts. Prefer this over many separate spawn calls: it is one undo step and much faster. Each part may include a procedural texture.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "parts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "primitive": { "type": "string", "enum": ["cube", "sphere", "cylinder", "cone", "plane", "torus"] },
+                                "position": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                                "scale": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                                "euler": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                                "color": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+                                "roughness": { "type": "number" },
+                                "metallic": { "type": "number" },
+                                "texture": {
+                                    "type": "object",
+                                    "properties": {
+                                        "pattern": { "type": "string", "enum": ["checkerboard", "value_noise", "wood", "brick", "gradient", "scratches"] },
+                                        "size": { "type": "integer" },
+                                        "color_a": { "type": "array", "items": { "type": "integer" }, "minItems": 4, "maxItems": 4 },
+                                        "color_b": { "type": "array", "items": { "type": "integer" }, "minItems": 4, "maxItems": 4 },
+                                        "scale": { "type": "number" },
+                                        "seed": { "type": "integer" },
+                                        "slot": { "type": "string", "enum": ["albedo", "roughness", "normal"] }
+                                    },
+                                    "required": ["pattern"]
+                                }
+                            },
+                            "required": ["primitive"]
+                        }
+                    }
+                },
+                "required": ["parts"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "clear_scene",
+            "description": "Remove every mesh from the scene (camera and lights are kept). Useful before building a fresh model. This is undoable.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": "duplicate_node",
+            "description": "Copy a mesh node, including its geometry and material, with an optional position offset.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string", "description": "Node to duplicate." },
+                    "new_name": { "type": "string" },
+                    "offset": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "set_camera",
+            "description": "Frame the scene for a screenshot: set the orbit target, distance and angles (radians).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "distance": { "type": "number" },
+                    "yaw": { "type": "number" },
+                    "pitch": { "type": "number" }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "undo",
             "description": "Revert the most recent scene mutation.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
@@ -349,6 +435,11 @@ async fn call_tool(params: Value, tx: &CommandSender) -> Result<Value, (i64, Str
         "modify_mesh",
         "apply_material",
         "generate_procedural_texture",
+        "render_viewport_snapshot",
+        "build_model",
+        "clear_scene",
+        "duplicate_node",
+        "set_camera",
         "undo",
         "redo",
     ];
@@ -370,11 +461,19 @@ async fn call_tool(params: Value, tx: &CommandSender) -> Result<Value, (i64, Str
     }
 
     match reply_rx.await {
-        Ok(Ok(value)) => Ok(json!({
-            "content": [{ "type": "text", "text": serialize_text(&value) }],
-            "structuredContent": value,
-            "isError": false
-        })),
+        Ok(Ok(value)) => {
+            // Tools that already return an MCP content array (e.g. screenshots)
+            // are passed through so image blocks survive unchanged.
+            if value.get("content").is_some() {
+                Ok(value)
+            } else {
+                Ok(json!({
+                    "content": [{ "type": "text", "text": serialize_text(&value) }],
+                    "structuredContent": value,
+                    "isError": false
+                }))
+            }
+        }
         Ok(Err(message)) => Ok(tool_error(&message)),
         Err(_) => Ok(tool_error("Render thread dropped the request")),
     }

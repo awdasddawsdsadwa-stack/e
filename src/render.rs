@@ -3,6 +3,8 @@
 
 use crate::scene::{NodeKind, Scene, TextureData as SceneTexture};
 use crate::ui::ShadingMode;
+use image::{DynamicImage, ImageFormat, RgbaImage};
+use std::io::Cursor;
 use three_d::*;
 
 pub struct Renderer {
@@ -141,6 +143,82 @@ impl Renderer {
 
         self.built_revision = scene.revision;
         self.built_shading = shading;
+    }
+
+    /// Render the current scene offscreen and return PNG bytes.
+    /// Used by the `render_viewport_snapshot` MCP tool so an AI can see its work.
+    pub fn snapshot_png(
+        &self,
+        scene: &Scene,
+        position: Vec3,
+        target: Vec3,
+        shading: ShadingMode,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, String> {
+        let width = width.clamp(64, 1024);
+        let height = height.clamp(64, 1024);
+        let color = Texture2D::new_empty::<[u8; 4]>(
+            &self.context,
+            width,
+            height,
+            Interpolation::Linear,
+            Interpolation::Linear,
+            None,
+            Wrapping::ClampToEdge,
+            Wrapping::ClampToEdge,
+        );
+        let depth = DepthTexture2D::new::<f32>(
+            &self.context,
+            width,
+            height,
+            Wrapping::ClampToEdge,
+            Wrapping::ClampToEdge,
+        );
+        let target_rt = RenderTarget::new(color.as_color_target(None), depth.as_depth_target());
+        let mut snapshot_camera = Camera::new_perspective(
+            Viewport::new_at_origo(width, height),
+            position,
+            target,
+            vec3(0.0, 1.0, 0.0),
+            degrees(45.0),
+            0.1,
+            1000.0,
+        );
+
+        let bg = scene.background;
+        target_rt.clear(ClearState::color_and_depth(bg[0], bg[1], bg[2], 1.0, 1.0));
+        match shading {
+            ShadingMode::Lit => {
+                if !self.lit.is_empty() {
+                    target_rt.render(&snapshot_camera, &self.lit, &[&self.ambient, &self.directional]);
+                }
+            }
+            ShadingMode::Unlit => {
+                if !self.unlit.is_empty() {
+                    target_rt.render(&snapshot_camera, &self.unlit, &[]);
+                }
+            }
+            ShadingMode::Wireframe => {
+                if !self.wires.is_empty() {
+                    target_rt.render(&snapshot_camera, &self.wires, &[]);
+                }
+            }
+        }
+        if !self.selection.is_empty() {
+            target_rt.render(&snapshot_camera, &self.selection, &[]);
+        }
+        target_rt.render(&snapshot_camera, &[&self.grid], &[]);
+
+        let pixels: Vec<[u8; 4]> = target_rt.read_color();
+        let raw: Vec<u8> = pixels.iter().flat_map(|pixel| pixel.iter().copied()).collect();
+        let rgba = RgbaImage::from_vec(width, height, raw)
+            .ok_or_else(|| "snapshot pixel buffer size mismatch".to_string())?;
+        let mut cursor = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(rgba)
+            .write_to(&mut cursor, ImageFormat::Png)
+            .map_err(|err| format!("PNG encode failed: {err}"))?;
+        Ok(cursor.into_inner())
     }
 
     pub fn render(

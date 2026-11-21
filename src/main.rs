@@ -12,13 +12,16 @@ mod scene;
 mod texture;
 mod ui;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use capabilities::GpuProfile;
 use ipc::AppCommand;
 use render::Renderer;
-use scene::{History, Material, MeshData, NodeId, OrbitCamera, PrimitiveKind, Scene, TextureData, Transform};
+use scene::{History, Material, MeshData, NodeId, NodeKind, OrbitCamera, PrimitiveKind, Scene, TextureData, Transform};
 use serde_json::{json, Value};
 use texture::{Pattern as TexturePattern, TextureOptions};
 use three_d::*;
+use tokio::sync::oneshot;
 use ui::UiState;
 
 fn main() {
@@ -60,11 +63,31 @@ fn main() {
     let mut pan_drag = false;
     let mut last_pointer = (0.0f32, 0.0f32);
     let mut last_time = 0.0f64;
+    let mut pending_capture: Option<(u32, u32, oneshot::Sender<Result<Value, String>>)> = None;
 
     window.render_loop(move |mut frame_input: FrameInput| {
-        // 1. Drain commands queued by the MCP thread.
+        // 1. Drain commands queued by the MCP thread. Camera and screenshot
+        // commands need main-thread state that is not part of `Scene`.
         while let Ok(command) = command_rx.try_recv() {
-            handle_command(command, &mut scene, &mut history, texture_limit);
+            match command.method.as_str() {
+                "set_camera" => handle_camera_command(command, &mut camera),
+                "render_viewport_snapshot" => {
+                    let width = command
+                        .params
+                        .get("width")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(512)
+                        .clamp(64, 1024) as u32;
+                    let height = command
+                        .params
+                        .get("height")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(width as u64)
+                        .clamp(64, 1024) as u32;
+                    pending_capture = Some((width, height, command.reply));
+                }
+                _ => handle_command(command, &mut scene, &mut history, texture_limit),
+            }
         }
 
         // 2. Advance the timeline when playing.
@@ -162,8 +185,159 @@ fn main() {
             &gui,
         );
 
+        // Reply to screenshot requests after the frame has been drawn.
+        if let Some((width, height, reply)) = pending_capture.take() {
+            let eye = camera.position();
+            let look = camera.target;
+            let response = match renderer.snapshot_png(
+                &scene,
+                vec3(eye.x, eye.y, eye.z),
+                vec3(look.x, look.y, look.z),
+                ui_state.shading,
+                width,
+                height,
+            ) {
+                Ok(bytes) => {
+                    let encoded = STANDARD.encode(&bytes);
+                    Ok(json!({
+                        "content": [{
+                            "type": "image",
+                            "data": encoded,
+                            "mimeType": "image/png"
+                        }],
+                        "structuredContent": {
+                            "width": width,
+                            "height": height,
+                            "bytes": bytes.len(),
+                            "shading": ui_state.shading.label(),
+                        },
+                        "isError": false,
+                    }))
+                }
+                Err(message) => Ok(json!({
+                    "content": [{ "type": "text", "text": message }],
+                    "isError": true,
+                })),
+            };
+            let _ = reply.send(response);
+        }
+
         FrameOutput::default()
     });
+}
+
+fn handle_camera_command(command: AppCommand, camera: &mut OrbitCamera) {
+    if let Some(target) = parse_array3(command.params.get("target")) {
+        camera.focus(glam::Vec3::from(target));
+    }
+    if let Some(distance) = command.params.get("distance").and_then(Value::as_f64) {
+        camera.distance = (distance as f32).clamp(0.5, 500.0);
+    }
+    if let Some(yaw) = command.params.get("yaw").and_then(Value::as_f64) {
+        camera.yaw = yaw as f32;
+    }
+    if let Some(pitch) = command.params.get("pitch").and_then(Value::as_f64) {
+        camera.pitch = (pitch as f32).clamp(-1.5, 1.5);
+    }
+    let _ = command.reply.send(Ok(json!({
+        "target": camera.target.to_array(),
+        "distance": camera.distance,
+        "yaw": camera.yaw,
+        "pitch": camera.pitch,
+    })));
+}
+
+fn build_model(
+    command: &AppCommand,
+    scene: &mut Scene,
+    history: &mut History,
+    texture_limit: u32,
+) -> Result<Value, String> {
+    let parts = command
+        .params
+        .get("parts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "'parts' must be an array".to_string())?;
+    history.push(scene);
+    let mut built = Vec::new();
+
+    for (index, part) in parts.iter().enumerate() {
+        let kind_name = part.get("primitive").and_then(Value::as_str).unwrap_or("cube");
+        let kind = PrimitiveKind::parse(kind_name)
+            .ok_or_else(|| format!("invalid primitive at part {index}: {kind_name}"))?;
+        let name = part.get("name").and_then(Value::as_str).map(str::to_string);
+        let id = scene.spawn_primitive(
+            kind,
+            name,
+            parse_array3(part.get("position")),
+            parse_array4(part.get("color")),
+        );
+
+        if let Some(scale) = parse_array3(part.get("scale")) {
+            scene.transform_object(id, None, None, Some(scale));
+        }
+        if let Some(euler) = parse_array3(part.get("euler")) {
+            let mut transform = Transform::default();
+            transform.set_euler(euler[0], euler[1], euler[2]);
+            scene.transform_object(id, None, Some(transform.rotation), None);
+        }
+        {
+            if let Some(material) = scene.material_mut(id) {
+                if let Some(roughness) = part.get("roughness").and_then(Value::as_f64) {
+                    material.roughness = roughness.clamp(0.0, 1.0) as f32;
+                }
+                if let Some(metallic) = part.get("metallic").and_then(Value::as_f64) {
+                    material.metallic = metallic.clamp(0.0, 1.0) as f32;
+                }
+            }
+        }
+        if let Some(texture_config) = part.get("texture") {
+            let pattern_name = texture_config
+                .get("pattern")
+                .and_then(Value::as_str)
+                .unwrap_or("checkerboard");
+            let pattern = match pattern_name {
+                "checkerboard" => TexturePattern::Checkerboard,
+                "value_noise" => TexturePattern::ValueNoise,
+                "wood" => TexturePattern::Wood,
+                "brick" => TexturePattern::Brick,
+                "gradient" => TexturePattern::Gradient,
+                "scratches" => TexturePattern::Scratches,
+                other => return Err(format!("unknown texture pattern at part {index}: {other}")),
+            };
+            let size = texture_config
+                .get("size")
+                .and_then(Value::as_u64)
+                .unwrap_or(256)
+                .clamp(2, texture_limit as u64) as u32;
+            let mut options = TextureOptions::default();
+            if let Some(color) = parse_u8_color(texture_config.get("color_a")) {
+                options.color_a = color;
+            }
+            if let Some(color) = parse_u8_color(texture_config.get("color_b")) {
+                options.color_b = color;
+            }
+            if let Some(scale) = texture_config.get("scale").and_then(Value::as_f64) {
+                options.scale = scale as f32;
+            }
+            if let Some(seed) = texture_config.get("seed").and_then(Value::as_u64) {
+                options.seed = seed as u32;
+            }
+            let tex = texture::generate(pattern, size, &options);
+            let slot = texture_config.get("slot").and_then(Value::as_str).unwrap_or("albedo");
+            if let Some(material) = scene.material_mut(id) {
+                assign_texture(material, slot, tex);
+            }
+        }
+
+        built.push(json!({
+            "id": id,
+            "name": scene.node(id).map(|n| n.name.clone()).unwrap_or_default(),
+        }));
+    }
+
+    scene.revision += 1;
+    Ok(json!({ "count": built.len(), "parts": built }))
 }
 
 fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History, texture_limit: u32) {
@@ -491,6 +665,56 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
             } else {
                 Err("Node is not a mesh".into())
             }
+        }
+
+        "build_model" => build_model(&command, scene, history, texture_limit),
+
+        "clear_scene" => {
+            history.push(scene);
+            let before = scene.nodes.len();
+            scene.nodes.retain(|node| !matches!(node.kind, NodeKind::Mesh { .. }));
+            scene.selected = None;
+            scene.revision += 1;
+            Ok(json!({ "removed": before - scene.nodes.len(), "remaining": scene.nodes.len() }))
+        }
+
+        "duplicate_node" => {
+            let Some(id) = resolve_id(scene, &command.params) else {
+                return_fail(command, "Node not found");
+                return;
+            };
+            let Some(source) = scene.node(id).cloned() else {
+                return_fail(command, "Node not found");
+                return;
+            };
+            let (mesh, material) = match &source.kind {
+                NodeKind::Mesh { mesh, material, .. } => (mesh.clone(), material.clone()),
+                _ => {
+                    return_fail(command, "Only mesh nodes can be duplicated");
+                    return;
+                }
+            };
+            let new_name = command
+                .params
+                .get("new_name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{}_copy", source.name));
+            let offset = parse_array3(command.params.get("offset")).unwrap_or([1.0, 0.0, 0.0]);
+            history.push(scene);
+            let copy_id = scene.create_custom_mesh(Some(new_name), mesh, Some(material));
+            let p = source.transform.position;
+            scene.transform_object(
+                copy_id,
+                Some([p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]),
+                Some(source.transform.rotation),
+                Some(source.transform.scale),
+            );
+            Ok(json!({
+                "id": copy_id,
+                "name": scene.node(copy_id).map(|n| n.name.clone()).unwrap_or_default(),
+                "source": id,
+            }))
         }
 
         "undo" => {

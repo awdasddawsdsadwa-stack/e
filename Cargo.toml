@@ -15,6 +15,7 @@ serde_json = "1.0.154"
 glam = "0.34.3"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 gltf = "1.4.1"
+base64 = "0.22"
 
 [profile.release]
 opt-level = 3
