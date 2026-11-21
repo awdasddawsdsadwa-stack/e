@@ -173,37 +173,8 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "spawn_primitive",
-            "description": "Spawn a primitive and select it. GEOMETRY CONTRACT: coordinates are Y-up (X/Z are the ground plane). Unit primitives: cube = 1x1x1 centered at origin (-0.5..0.5 on each axis); sphere = diameter 1; cylinder = radius 0.5 and height 1 along Y; cone = radius 0.5, height 1; plane = 1x1 on XZ; torus = major radius 0.5, tube 0.18. `position` is the object's CENTER. `scale` MULTIPLIES these local dimensions, e.g. scale [4,0.6,1] makes a 4x0.6x1 box. A `plane` has ZERO thickness — for solid panels use a thin cube (e.g. scale [2,0.05,1]) or apply the solidify modifier. Always set all three scale components to give an object real depth, then verify with get_object_info bounds.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "primitive": {
-                        "type": "string",
-                        "enum": ["cube", "sphere", "cylinder", "cone", "plane", "torus"],
-                        "description": "Which primitive to create."
-                    },
-                    "name": { "type": "string", "description": "Optional object name (auto-generated when omitted)." },
-                    "position": {
-                        "type": "array",
-                        "items": { "type": "number" },
-                        "minItems": 3, "maxItems": 3,
-                        "description": "World position [x, y, z]."
-                    },
-                    "color": {
-                        "type": "array",
-                        "items": { "type": "number" },
-                        "minItems": 4, "maxItems": 4,
-                        "description": "Linear RGBA base colour."
-                    }
-                },
-                "required": ["primitive"],
-                "additionalProperties": false
-            }
-        }),
-        json!({
             "name": "transform_object",
-            "description": "Move, rotate or scale a node (by id or case-insensitive name). Y is up; X/Z are ground. `position` sets the object's CENTER. `scale` is multiplicative on the unit primitives (cube 1x1x1, cylinder radius 0.5 height 1, sphere diameter 1, cone radius 0.5 height 1, torus major 0.5 tube 0.18, plane 1x1 on XZ) — e.g. scale [4,0.6,1] is a 4x0.6x1 box. `euler` is radians. Only supplied fields change; call get_object_info afterwards to confirm world-space bounds.",
+            "description": "Move, rotate or scale a node (by id or case-insensitive name). Y is up; X/Z are ground. `position` sets the object's origin. `scale` multiplies the mesh's local vertex coordinates; use set_dimensions if you want to specify world size directly. `euler` is radians. Only supplied fields change; call get_object_info afterwards to confirm world-space bounds.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -220,33 +191,6 @@ fn tool_definitions() -> Vec<Value> {
                     },
                     "scale": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
                 },
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "create_custom_mesh",
-            "description": "Create a mesh from raw vertex buffers. IMPORTANT: coordinates are LOCAL to the node, Y-up, and must have real thickness in all three axes unless a flat plane is intended. Do not stack several zero-thickness planes to fake a solid. Supply positions ([[x,y,z],...]) spanning X, Y and Z, and triangle indices (flat list, length divisible by 3). Normals/UVs are optional; auto_uv=true generates box-projection UVs and auto-generated normals are added when missing. Verify the result with get_object_info bounds (size must be non-zero on all three axes for a solid).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" },
-                    "positions": {
-                        "type": "array",
-                        "items": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
-                    },
-                    "normals": {
-                        "type": "array",
-                        "items": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
-                    },
-                    "uvs": {
-                        "type": "array",
-                        "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }
-                    },
-                    "indices": { "type": "array", "items": { "type": "integer" } },
-                    "auto_uv": { "type": "boolean", "description": "Generate box-projection UVs (default true)." },
-                    "base_color": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 }
-                },
-                "required": ["positions", "indices"],
                 "additionalProperties": false
             }
         }),
@@ -318,7 +262,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "render_viewport_snapshot",
-            "description": "Render the current scene from the editor camera and return a resized PNG as an image content block (base64). Use this to visually inspect your own work and catch mistakes.",
+            "description": "Render the scene to a PNG image block. You may set the camera explicitly with camera_position (eye) and camera_target (look-at), or use a view preset, or leave both unset to use the current editor camera. Y-up; useful for multi-angle self-checks.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -327,50 +271,14 @@ fn tool_definitions() -> Vec<Value> {
                     "view": {
                         "type": "string",
                         "enum": ["current", "front", "back", "left", "right", "top", "three_quarter"],
-                        "description": "Optional camera preset for a multi-angle check (default current). front views from +Z, right from +X, back from -Z, left from -X, top from +Y."
-                    }
+                        "description": "Optional camera preset (default current). front = +Z, right = +X, back = -Z, left = -X, top = +Y."
+                    },
+                    "camera_position": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "Explicit eye position [x,y,z] in world space (overrides view)." },
+                    "camera_target": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "Explicit look-at point [x,y,z] (defaults to the orbit target)." },
+                    "yaw": { "type": "number", "description": "Orbit yaw in radians (alternative to camera_position)." },
+                    "pitch": { "type": "number", "description": "Orbit pitch in radians (alternative to camera_position)." },
+                    "distance": { "type": "number", "description": "Orbit distance (alternative to camera_position)." }
                 },
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "build_model",
-            "description": "Build a whole model in ONE call from a list of parts (one undo step). Each part uses the unit-primitive contract: cube 1x1x1, cylinder radius 0.5 height 1 along Y, sphere diameter 1, cone radius 0.5 height 1, plane 1x1 on XZ, torus major 0.5 tube 0.18. `position` is the CENTER, `scale` multiplies local dimensions (so [4,0.6,1] = a 4x0.6x1 box), `euler` is radians, Y-up with X/Z ground. Give every solid non-zero depth on all three axes; do not fake solids with stacked planes. After building, call get_scene_hierarchy and check bounds.size on each part.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "parts": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": { "type": "string" },
-                                "primitive": { "type": "string", "enum": ["cube", "sphere", "cylinder", "cone", "plane", "torus"] },
-                                "position": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
-                                "scale": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
-                                "euler": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
-                                "color": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
-                                "roughness": { "type": "number" },
-                                "metallic": { "type": "number" },
-                                "texture": {
-                                    "type": "object",
-                                    "properties": {
-                                        "pattern": { "type": "string", "enum": ["checkerboard", "value_noise", "wood", "brick", "gradient", "scratches"] },
-                                        "size": { "type": "integer" },
-                                        "color_a": { "type": "array", "items": { "type": "integer" }, "minItems": 4, "maxItems": 4 },
-                                        "color_b": { "type": "array", "items": { "type": "integer" }, "minItems": 4, "maxItems": 4 },
-                                        "scale": { "type": "number" },
-                                        "seed": { "type": "integer" },
-                                        "slot": { "type": "string", "enum": ["albedo", "roughness", "normal"] }
-                                    },
-                                    "required": ["pattern"]
-                                }
-                            },
-                            "required": ["primitive"]
-                        }
-                    }
-                },
-                "required": ["parts"],
                 "additionalProperties": false
             }
         }),
@@ -813,14 +721,11 @@ async fn call_tool(params: Value, tx: &CommandSender) -> Result<Value, (i64, Str
 
     let known = [
         "get_scene_hierarchy",
-        "spawn_primitive",
         "transform_object",
-        "create_custom_mesh",
         "modify_mesh",
         "apply_material",
         "generate_procedural_texture",
         "render_viewport_snapshot",
-        "build_model",
         "clear_scene",
         "duplicate_node",
         "set_camera",
@@ -931,7 +836,7 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"get_scene_hierarchy"));
-        assert!(names.contains(&"spawn_primitive"));
+        assert!(names.contains(&"create_mesh_from_faces"));
         assert!(names.contains(&"transform_object"));
         assert!(names.contains(&"undo"));
         assert!(names.contains(&"redo"));

@@ -18,7 +18,7 @@ use base64::Engine as _;
 use capabilities::GpuProfile;
 use ipc::AppCommand;
 use render::Renderer;
-use scene::{History, LightType, Material, MeshData, NodeId, NodeKind, OrbitCamera, PrimitiveKind, Scene, TextureData, Transform};
+use scene::{History, LightType, Material, NodeId, NodeKind, OrbitCamera, PrimitiveKind, Scene, TextureData, Transform};
 use serde_json::{json, Value};
 use texture::{Pattern as TexturePattern, TextureOptions};
 use std::collections::HashSet;
@@ -155,6 +155,25 @@ fn main() {
                             camera.pitch = 0.35;
                         }
                         _ => {}
+                    }
+                    if let Some(target) = parse_array3(command.params.get("camera_target")) {
+                        camera.focus(glam::Vec3::from(target));
+                    }
+                    if let Some(eye) = parse_array3(command.params.get("camera_position")) {
+                        let offset = glam::Vec3::from(eye) - camera.target;
+                        let distance = offset.length().max(0.1);
+                        camera.distance = distance;
+                        camera.pitch = (offset.y / distance).clamp(-0.999, 0.999).asin();
+                        camera.yaw = offset.z.atan2(offset.x);
+                    }
+                    if let Some(yaw) = command.params.get("yaw").and_then(Value::as_f64) {
+                        camera.yaw = yaw as f32;
+                    }
+                    if let Some(pitch) = command.params.get("pitch").and_then(Value::as_f64) {
+                        camera.pitch = (pitch as f32).clamp(-1.5, 1.5);
+                    }
+                    if let Some(distance) = command.params.get("distance").and_then(Value::as_f64) {
+                        camera.distance = (distance as f32).clamp(0.5, 500.0);
                     }
                     pending_capture = Some((width, height, command.reply));
                 }
@@ -319,6 +338,7 @@ fn handle_camera_command(command: AppCommand, camera: &mut OrbitCamera) {
     })));
 }
 
+#[allow(dead_code)] // retained internally; not exposed as an MCP tool
 fn build_model(
     command: &AppCommand,
     scene: &mut Scene,
@@ -431,34 +451,6 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
     let result: Result<Value, String> = match command.method.as_str() {
         "get_scene_hierarchy" => Ok(scene.hierarchy_json()),
 
-        "spawn_primitive" => {
-            let kind_name = command
-                .params
-                .get("primitive")
-                .and_then(Value::as_str)
-                .unwrap_or("cube");
-            match PrimitiveKind::parse(kind_name) {
-                Some(kind) => {
-                    let name = command
-                        .params
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    let position = parse_array3(command.params.get("position"));
-                    let color = parse_array4(command.params.get("color"));
-                    history.push(scene);
-                    let id = scene.spawn_primitive(kind, name, position, color);
-                    Ok(json!({
-                        "id": id,
-                        "name": scene.node(id).map(|n| n.name.clone()).unwrap_or_default(),
-                        "primitive": kind.as_str(),
-                        "bounds": scene.node(id).and_then(|n| n.world_bounds().map(|(_, _, size)| size)),
-                    }))
-                }
-                None => Err(format!("Unknown primitive '{kind_name}'. Use cube, sphere, cylinder, cone, plane or torus.")),
-            }
-        }
-
         "transform_object" => {
             let Some(id) = resolve_id(scene, &command.params) else {
                 return_fail(command, "Node not found (supply a valid 'id' or 'name')");
@@ -483,56 +475,6 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
             } else {
                 Err("Transform failed".into())
             }
-        }
-
-        "create_custom_mesh" => {
-            let Some(positions) = parse_vec3_array(command.params.get("positions")) else {
-                return_fail(command, "'positions' must be an array of [x, y, z] triples");
-                return;
-            };
-            let Some(indices) = parse_u32_array(command.params.get("indices")) else {
-                return_fail(command, "'indices' must be an array of vertex indices");
-                return;
-            };
-            if positions.is_empty() || indices.is_empty() || indices.len() % 3 != 0 {
-                return_fail(command, "positions must be non-empty and indices must be a multiple of 3");
-                return;
-            }
-            let mut mesh = MeshData {
-                positions,
-                normals: parse_vec3_array(command.params.get("normals")).unwrap_or_default(),
-                uvs: parse_vec2_array(command.params.get("uvs")).unwrap_or_default(),
-                indices,
-            };
-            let auto_uv = command.params.get("auto_uv").and_then(Value::as_bool).unwrap_or(true);
-            if auto_uv {
-                mesh_ops::box_project_uvs(&mut mesh, 1.0);
-            }
-            if mesh.normals.len() != mesh.positions.len() {
-                mesh.recalculate_normals();
-            }
-            if mesh.uvs.len() != mesh.positions.len() {
-                mesh_ops::box_project_uvs(&mut mesh, 1.0);
-            }
-            let vertex_count = mesh.positions.len();
-            let triangle_count = mesh.indices.len() / 3;
-            let name = command.params.get("name").and_then(Value::as_str).map(str::to_string);
-            let base_color = parse_array4(command.params.get("base_color"))
-                .unwrap_or([0.72, 0.74, 0.78, 1.0]);
-            history.push(scene);
-            let id = scene.create_custom_mesh(
-                name,
-                mesh,
-                Some(Material { base_color, ..Default::default() }),
-            );
-            Ok(json!({
-                "id": id,
-                "name": scene.node(id).map(|n| n.name.clone()).unwrap_or_default(),
-                "vertices": vertex_count,
-                "triangles": triangle_count,
-                "auto_uv": auto_uv,
-                "bounds": scene.node(id).and_then(|n| n.world_bounds().map(|(_, _, size)| size)),
-            }))
         }
 
         "modify_mesh" => {
@@ -755,8 +697,6 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
                 Err("Node is not a mesh".into())
             }
         }
-
-        "build_model" => build_model(&command, scene, history, texture_limit),
 
         "clear_scene" => {
             history.push(scene);
@@ -1520,31 +1460,24 @@ fn resolve_id(scene: &Scene, params: &Value) -> Option<NodeId> {
 
 const MODELING_GUIDE: &str = "\
 FORGE MODELING GUIDE — Y is up, X/Z are the ground plane, 1 unit = 1 metre.\n\
-BLENDER-STYLE TOPOLOGY: for anything more complex than a simple prop, build a real mesh with\n\
-create_mesh_from_faces (explicit vertices + polygon faces) instead of stacking boxes and cylinders.\n\
-That tool behaves like bmesh.from_pydata: faces are vertex-index lists and are triangulated for you.\n\
-Then use get_mesh_topology to find triangle face indices, and edit with extrude_faces,\n\
-inset_faces, weld_vertices, flip_normals and bevel_mesh. Stacked primitives look like Roblox;\n\
-topology editing looks like Blender. Reserve spawn_primitive for wheels, bolts and simple props.\n\
-PRIMITIVE LOCAL DIMENSIONS (before scale):\n\
-- cube: 1 x 1 x 1, centred at origin (-0.5..0.5 on each axis)\n\
-- sphere: diameter 1\n\
-- cylinder: radius 0.5, height 1 along Y\n\
-- cone: radius 0.5, height 1 along Y\n\
-- torus: major radius 0.5, tube 0.18; lies flat in XZ with height 0.36\n\
-- plane: 1 x 1 on XZ with ZERO thickness — use a thin cube or the solidify modifier for solids\n\
-POSITION sets the object's CENTER. SCALE MULTIPLIES local dimensions: a desired world size\n\
-[w, h, d] means scale [w, h, d] for cube/sphere/cylinder/cone, and [w/1.36, h/0.36, d/1.36]\n\
-for torus. Prefer set_dimensions({size:[w,h,d]}) so the engine computes scale for you.\n\
-GROUND CONTACT: 'ground' in bounds is derived from the AABB's lowest point (min.y). To rest an\n\
-object on the ground, set its centre Y to half its height (a 4x0.6x1 box -> centre y=0.3).\n\
-SELF-CHECK PROCEDURE: 1) build with build_model or spawn_primitive; 2) call get_scene_info and\n\
-check every part's size and ground status; 3) call render_viewport_snapshot with views\n\
-'front' (from +Z), 'right' (from +X), 'top' and 'three_quarter' to see it from several angles;\n\
-4) fix anything\n\
-floating, below ground, or zero-thickness; 5) finish with get_scene_hierarchy.\n\
-NEVER stack zero-thickness planes to fake a solid, leave parts floating, or guess scale\n\
-without reading back bounds. Use get_object_info to inspect one part in detail.\n";
+GEOMETRY CREATION: create_mesh_from_faces is the ONLY way to make geometry. There are no\n\
+primitive spawners. Author real meshes as explicit vertices + polygon faces, like Blender's\n\
+bmesh.from_pydata. Faces are vertex index lists (3+ entries) and are triangulated for you.\n\
+Example box: 8 corner vertices at +/- half-extents, 6 quad faces such as [0,1,2,3].\n\
+Example wheel/cylinder: two rings of 12-16 vertices around Y plus two end-cap faces.\n\
+Then use get_mesh_topology to find triangle face ids and edit with extrude_faces,\n\
+inset_faces, weld_vertices, flip_normals, bevel_mesh, and apply_modifier (mirror, array,\n\
+solidify, subdivide, smooth). Move/place with transform_object or set_dimensions.\n\
+DO NOT stack boxes or zero-thickness planes to fake a solid: author proper faces with depth\n\
+on all three axes. This is the difference between a Roblox-looking stack and a Blender model.\n\
+POSITION is the mesh origin; SCALE multiplies the local vertex coordinates. When you want an\n\
+exact world size, use set_dimensions({size:[w,h,d]}) and let the engine compute the scale.\n\
+GROUND CONTACT: 'ground' derives from the AABB's lowest point (min.y). To rest on the ground,\n\
+set the object's centre Y to half its height.\n\
+SELF-CHECK: 1) create a mesh; 2) call get_scene_info and check size/ground of every part;\n\
+3) call render_viewport_snapshot with camera_position/camera_target, or view presets\n\
+'front' (+Z), 'right' (+X), 'top', 'three_quarter'; 4) fix zero-thickness, floating or\n\
+badly oriented parts; 5) finish with get_scene_hierarchy.\n";
 
 fn kind_label(kind: &NodeKind) -> &'static str {
     match kind {
@@ -1568,19 +1501,6 @@ fn parse_vec3_array(value: Option<&Value>) -> Option<Vec<[f32; 3]>> {
     value?.as_array()?.iter().map(|v| parse_array3(Some(v))).collect()
 }
 
-fn parse_vec2_array(value: Option<&Value>) -> Option<Vec<[f32; 2]>> {
-    let arr = value?.as_array()?;
-    let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
-        let pair = item.as_array()?;
-        if pair.len() != 2 {
-            return None;
-        }
-        out.push([pair[0].as_f64()? as f32, pair[1].as_f64()? as f32]);
-    }
-    Some(out)
-}
-
 fn parse_faces(value: Option<&Value>) -> Option<Vec<Vec<usize>>> {
     value?
         .as_array()?
@@ -1599,14 +1519,6 @@ fn parse_faces_as_vec(value: Option<&Value>) -> Option<Vec<usize>> {
         .as_array()?
         .iter()
         .map(|index| index.as_u64().map(|value| value as usize))
-        .collect()
-}
-
-fn parse_u32_array(value: Option<&Value>) -> Option<Vec<u32>> {
-    value?
-        .as_array()?
-        .iter()
-        .map(|v| v.as_u64().map(|index| index as u32))
         .collect()
 }
 

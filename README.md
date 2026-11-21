@@ -47,14 +47,14 @@ Example MCP handshake:
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"example","version":"1.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list"}
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"spawn_primitive","arguments":{"primitive":"torus","position":[0,1,0]}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_mesh_from_faces","arguments":{"name":"Quad","vertices":[[-1,0,-1],[1,0,-1],[1,0,1],[-1,0,1]],"faces":[[0,1,2,3]]}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_scene_hierarchy","arguments":{}}}
 ```
 
 ### Tool groups
 
 - **Measure**: `get_scene_hierarchy`, `get_object_info`, `get_scene_info`, `get_viewport_info`, `get_mesh_topology`, `get_modeling_guide`
-- **Build**: `spawn_primitive`, `create_custom_mesh`, `create_mesh_from_faces`, `build_model`, `duplicate_node`
+- **Build**: `create_mesh_from_faces` (the only geometry creator), `duplicate_node`
 - **Blender-style topology**: `extrude_faces`, `inset_faces`, `weld_vertices`, `flip_normals`, `bevel_mesh`
 - **Modifiers**: `apply_modifier` (mirror, array, solidify, smooth, triangulate, subdivide, extrude, recalculate normals), `modify_mesh`, `set_dimensions`
 - **Materials**: `apply_material`, `set_material_preset`, `generate_procedural_texture`
