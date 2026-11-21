@@ -207,7 +207,7 @@ impl Renderer {
             Wrapping::ClampToEdge,
         );
         let target_rt = RenderTarget::new(color.as_color_target(None), depth.as_depth_target());
-        let mut snapshot_camera = Camera::new_perspective(
+        let snapshot_camera = Camera::new_perspective(
             Viewport::new_at_origo(width, height),
             position,
             target,

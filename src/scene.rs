@@ -757,17 +757,20 @@ impl Scene {
     }
 
     pub fn reset_pose(&mut self, armature_id: NodeId) -> Result<usize, String> {
-        let node = self.node_mut(armature_id).ok_or_else(|| "armature not found".to_string())?;
-        match &mut node.kind {
-            NodeKind::Armature { pose, .. } => {
-                for entry in pose.iter_mut() {
-                    *entry = Transform::default();
+        let count = {
+            let node = self.node_mut(armature_id).ok_or_else(|| "armature not found".to_string())?;
+            match &mut node.kind {
+                NodeKind::Armature { pose, .. } => {
+                    for entry in pose.iter_mut() {
+                        *entry = Transform::default();
+                    }
+                    pose.len()
                 }
-                self.revision += 1;
-                Ok(pose.len())
+                _ => return Err("node is not an armature".into()),
             }
-            _ => Err("node is not an armature".into()),
-        }
+        };
+        self.revision += 1;
+        Ok(count)
     }
 
     pub fn hierarchy_json(&self) -> Value {
