@@ -705,6 +705,88 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "create_armature",
+            "description": "Create an armature (skeleton) object. Add bones with add_bone, then bind a mesh with auto_bind_skin.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "add_bone",
+            "description": "Add a bone to an armature using bind-time world-space head and tail positions. Parent index (optional) makes a bone chain. Bone local +Y runs from head to tail.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "armature": { "type": "string", "description": "Armature node name (or use armature_id)." },
+                    "armature_id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "parent": { "type": "integer", "description": "Parent bone index." },
+                    "head": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "tail": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                },
+                "required": ["name", "head", "tail"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "auto_bind_skin",
+            "description": "Bind a mesh to an armature with automatic distance-envelope weights (up to 4 bones per vertex, normalized). Both mesh and armature should be at the origin with identity transforms when binding.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mesh": { "type": "string", "description": "Mesh node name (or use mesh_id)." },
+                    "mesh_id": { "type": "integer" },
+                    "armature": { "type": "string" },
+                    "armature_id": { "type": "integer" },
+                    "max_weights": { "type": "integer", "description": "Max bones per vertex, capped at 4 (default 4)." }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "set_bone_pose",
+            "description": "Pose a bone by index with euler angles (radians), quaternion, and optional local translation. The mesh deforms immediately.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "armature": { "type": "string" },
+                    "armature_id": { "type": "integer" },
+                    "bone": { "type": "integer", "description": "Bone index." },
+                    "euler": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "rotation": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+                    "position": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                },
+                "required": ["bone"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "get_armature_info",
+            "description": "Inspect an armature: bone names, parents, bind-time head/tail, current pose rotations, and which meshes are bound to it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "armature": { "type": "string" },
+                    "armature_id": { "type": "integer" }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "reset_pose",
+            "description": "Reset every bone in an armature to its rest pose.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "armature": { "type": "string" },
+                    "armature_id": { "type": "integer" }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "undo",
             "description": "Revert the most recent scene mutation.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
@@ -749,6 +831,12 @@ async fn call_tool(params: Value, tx: &CommandSender) -> Result<Value, (i64, Str
         "weld_vertices",
         "flip_normals",
         "bevel_mesh",
+        "create_armature",
+        "add_bone",
+        "auto_bind_skin",
+        "set_bone_pose",
+        "get_armature_info",
+        "reset_pose",
         "get_scene_info",
         "get_modeling_guide",
         "set_dimensions",

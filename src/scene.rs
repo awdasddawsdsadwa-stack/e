@@ -3,9 +3,11 @@
 //! This module is deliberately free of any rendering API so it can be reasoned
 //! about (and tested) independently of `three-d`.
 
+use crate::rig::Armature;
 use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 pub type NodeId = u32;
 
@@ -173,6 +175,16 @@ impl Material {
     }
 }
 
+/// Deform weights binding a mesh to an armature (Blender-style vertex groups).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SkinBinding {
+    pub armature: NodeId,
+    /// Up to four bone indices per vertex.
+    pub joints: Vec<[u16; 4]>,
+    /// Corresponding normalized weights per vertex.
+    pub weights: Vec<[f32; 4]>,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PrimitiveKind {
     Cube,
@@ -229,6 +241,11 @@ pub enum NodeKind {
         color: [f32; 3],
         intensity: f32,
     },
+    Armature {
+        armature: Armature,
+        /// One local transform per bone; defaults to the rest pose.
+        pose: Vec<Transform>,
+    },
 }
 
 impl NodeKind {
@@ -238,6 +255,7 @@ impl NodeKind {
             Self::Mesh { .. } => "Mesh",
             Self::Camera => "Camera",
             Self::Light { .. } => "Light",
+            Self::Armature { .. } => "Armature",
         }
     }
 }
@@ -342,6 +360,19 @@ impl SceneNode {
                 });
                 v
             }
+            NodeKind::Armature { armature, pose } => {
+                let mut v = base;
+                v["armature"] = json!({
+                    "bones": armature.bones.iter().enumerate().map(|(index, bone)| json!({
+                        "index": index,
+                        "name": bone.name,
+                        "parent": bone.parent,
+                        "length": bone.length,
+                        "pose_euler": pose.get(index).map(|t| t.euler()).unwrap_or([0.0; 3]),
+                    })).collect::<Vec<_>>(),
+                });
+                v
+            }
         }
     }
 }
@@ -372,6 +403,8 @@ pub struct Scene {
     pub next_id: NodeId,
     pub timeline: TimelineState,
     pub background: [f32; 3],
+    /// Mesh node id -> skinning data.
+    pub skinning: HashMap<NodeId, SkinBinding>,
     /// Bumped on every mutation so the renderer knows when to rebuild GPU resources.
     pub revision: u64,
 }
@@ -418,6 +451,7 @@ impl Scene {
             next_id: 3,
             timeline: TimelineState::default(),
             background: [0.09, 0.09, 0.11],
+            skinning: HashMap::new(),
             revision: 0,
         }
     }
@@ -637,6 +671,102 @@ impl Scene {
             true
         } else {
             false
+        }
+    }
+
+    pub fn create_armature(&mut self, name: Option<String>) -> NodeId {
+        let id = self.next_id;
+        self.next_id += 1;
+        let label = name.unwrap_or_else(|| format!("Armature.{}", id));
+        self.nodes.push(SceneNode {
+            id,
+            name: label,
+            parent: None,
+            transform: Transform::default(),
+            visible: true,
+            kind: NodeKind::Armature { armature: Armature::new(), pose: Vec::new() },
+        });
+        self.selected = Some(id);
+        self.revision += 1;
+        id
+    }
+
+    pub fn add_bone(
+        &mut self,
+        armature_id: NodeId,
+        name: String,
+        parent: Option<usize>,
+        head: [f32; 3],
+        tail: [f32; 3],
+    ) -> Result<usize, String> {
+        let node = self.node_mut(armature_id).ok_or_else(|| "armature not found".to_string())?;
+        match &mut node.kind {
+            NodeKind::Armature { armature, pose } => {
+                let index = armature.add_bone(name, parent, head, tail)?;
+                armature.recompute_bind();
+                if pose.len() < armature.bones.len() {
+                    pose.push(Transform::default());
+                }
+                self.revision += 1;
+                Ok(index)
+            }
+            _ => Err("node is not an armature".into()),
+        }
+    }
+
+    pub fn bind_skin(
+        &mut self,
+        mesh_id: NodeId,
+        armature_id: NodeId,
+        max_weights: usize,
+    ) -> Result<usize, String> {
+        let vertices = self
+            .mesh(mesh_id)
+            .ok_or_else(|| "mesh not found".to_string())?
+            .positions
+            .clone();
+        let armature_node = self.node(armature_id).ok_or_else(|| "armature not found".to_string())?;
+        let (joints, weights) = match &armature_node.kind {
+            NodeKind::Armature { armature, .. } => armature.auto_weights(&vertices, max_weights),
+            _ => return Err("node is not an armature".into()),
+        };
+        let vertex_count = joints.len();
+        self.skinning.insert(mesh_id, SkinBinding { armature: armature_id, joints, weights });
+        self.revision += 1;
+        Ok(vertex_count)
+    }
+
+    pub fn set_bone_pose(
+        &mut self,
+        armature_id: NodeId,
+        bone: usize,
+        transform: Transform,
+    ) -> Result<(), String> {
+        let node = self.node_mut(armature_id).ok_or_else(|| "armature not found".to_string())?;
+        match &mut node.kind {
+            NodeKind::Armature { pose, .. } => {
+                if bone >= pose.len() {
+                    return Err(format!("bone index {bone} out of range"));
+                }
+                pose[bone] = transform;
+            }
+            _ => return Err("node is not an armature".into()),
+        }
+        self.revision += 1;
+        Ok(())
+    }
+
+    pub fn reset_pose(&mut self, armature_id: NodeId) -> Result<usize, String> {
+        let node = self.node_mut(armature_id).ok_or_else(|| "armature not found".to_string())?;
+        match &mut node.kind {
+            NodeKind::Armature { pose, .. } => {
+                for entry in pose.iter_mut() {
+                    *entry = Transform::default();
+                }
+                self.revision += 1;
+                Ok(pose.len())
+            }
+            _ => Err("node is not an armature".into()),
         }
     }
 

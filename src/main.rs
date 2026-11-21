@@ -8,6 +8,7 @@ mod ipc;
 mod mesh_ops;
 mod mcp;
 mod render;
+mod rig;
 mod scene;
 mod texture;
 mod ui;
@@ -1356,6 +1357,129 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
             Ok(json!({ "id": id, "light": scene.node(id).map(|n| n.to_json()).unwrap_or_default() }))
         }
 
+        "create_armature" => {
+            let name = command.params.get("name").and_then(Value::as_str).map(str::to_string);
+            history.push(scene);
+            let id = scene.create_armature(name);
+            Ok(json!({
+                "id": id,
+                "name": scene.node(id).map(|n| n.name.clone()).unwrap_or_default(),
+            }))
+        }
+
+        "add_bone" => {
+            let Some(armature_id) = resolve_armature(scene, &command.params) else {
+                return_fail(command, "Armature not found");
+                return;
+            };
+            let name = command
+                .params
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("Bone")
+                .to_string();
+            let Some(head) = parse_array3(command.params.get("head")) else {
+                return_fail(command, "'head' must be [x,y,z]");
+                return;
+            };
+            let Some(tail) = parse_array3(command.params.get("tail")) else {
+                return_fail(command, "'tail' must be [x,y,z]");
+                return;
+            };
+            let parent = command.params.get("parent").and_then(Value::as_u64).map(|value| value as usize);
+            history.push(scene);
+            match scene.add_bone(armature_id, name, parent, head, tail) {
+                Ok(index) => Ok(json!({
+                    "armature": armature_id,
+                    "bone": index,
+                    "name": scene.node(armature_id).and_then(|node| match &node.kind {
+                        NodeKind::Armature { armature, .. } => armature.bones.get(index).map(|bone| bone.name.clone()),
+                        _ => None,
+                    }).unwrap_or_default(),
+                })),
+                Err(message) => Err(message),
+            }
+        }
+
+        "auto_bind_skin" => {
+            let Some(armature_id) = resolve_armature(scene, &command.params) else {
+                return_fail(command, "Armature not found");
+                return;
+            };
+            let mesh_id = resolve_named_mesh(scene, &command.params);
+            let Some(mesh_id) = mesh_id else {
+                return_fail(command, "Mesh not found");
+                return;
+            };
+            let max_weights = command.params.get("max_weights").and_then(Value::as_u64).unwrap_or(4) as usize;
+            history.push(scene);
+            match scene.bind_skin(mesh_id, armature_id, max_weights) {
+                Ok(vertices) => Ok(json!({
+                    "mesh": mesh_id,
+                    "armature": armature_id,
+                    "weighted_vertices": vertices,
+                })),
+                Err(message) => Err(message),
+            }
+        }
+
+        "set_bone_pose" => {
+            let Some(armature_id) = resolve_armature(scene, &command.params) else {
+                return_fail(command, "Armature not found");
+                return;
+            };
+            let Some(bone) = command.params.get("bone").and_then(Value::as_u64) else {
+                return_fail(command, "'bone' index is required");
+                return;
+            };
+            let position = parse_array3(command.params.get("position"));
+            let rotation = if let Some(euler) = parse_array3(command.params.get("euler")) {
+                let mut transform = Transform::default();
+                transform.set_euler(euler[0], euler[1], euler[2]);
+                Some(transform.rotation)
+            } else {
+                parse_array4(command.params.get("rotation"))
+            };
+            let mut transform = Transform { position: position.unwrap_or([0.0; 3]), ..Default::default() };
+            if let Some(quat) = rotation {
+                transform.rotation = quat;
+            }
+            history.push(scene);
+            match scene.set_bone_pose(armature_id, bone as usize, transform) {
+                Ok(()) => Ok(json!({ "armature": armature_id, "bone": bone, "pose": transform.to_json() })),
+                Err(message) => Err(message),
+            }
+        }
+
+        "get_armature_info" => {
+            let Some(armature_id) = resolve_armature(scene, &command.params) else {
+                return_fail(command, "Armature not found");
+                return;
+            };
+            let node = scene.node(armature_id).unwrap();
+            let bound: Vec<NodeId> = scene
+                .skinning
+                .iter()
+                .filter(|(_, binding)| binding.armature == armature_id)
+                .map(|(id, _)| *id)
+                .collect();
+            let mut result = node.to_json();
+            result["bound_meshes"] = json!(bound);
+            Ok(result)
+        }
+
+        "reset_pose" => {
+            let Some(armature_id) = resolve_armature(scene, &command.params) else {
+                return_fail(command, "Armature not found");
+                return;
+            };
+            history.push(scene);
+            match scene.reset_pose(armature_id) {
+                Ok(count) => Ok(json!({ "armature": armature_id, "bones_reset": count })),
+                Err(message) => Err(message),
+            }
+        }
+
         "undo" => {
             if history.undo(scene) {
                 scene.revision += 1;
@@ -1428,6 +1552,7 @@ fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::Mesh { .. } => "Mesh",
         NodeKind::Camera => "Camera",
         NodeKind::Light { .. } => "Light",
+        NodeKind::Armature { .. } => "Armature",
     }
 }
 
@@ -1495,6 +1620,26 @@ fn parse_u8_color(value: Option<&Value>) -> Option<[u8; 4]> {
         out[slot] = value.as_u64()?.min(255) as u8;
     }
     Some(out)
+}
+
+fn resolve_armature(scene: &Scene, params: &Value) -> Option<NodeId> {
+    if let Some(id) = params.get("armature_id").and_then(Value::as_u64) {
+        return Some(id as NodeId);
+    }
+    if let Some(name) = params.get("armature").and_then(Value::as_str) {
+        return scene.node_by_name(name).map(|node| node.id);
+    }
+    scene.nodes.iter().find(|node| matches!(node.kind, NodeKind::Armature { .. })).map(|node| node.id)
+}
+
+fn resolve_named_mesh(scene: &Scene, params: &Value) -> Option<NodeId> {
+    if let Some(id) = params.get("mesh_id").and_then(Value::as_u64) {
+        return Some(id as NodeId);
+    }
+    if let Some(name) = params.get("mesh").and_then(Value::as_str) {
+        return scene.node_by_name(name).map(|node| node.id);
+    }
+    scene.selected.filter(|id| scene.mesh(*id).is_some())
 }
 
 fn parse_array3(value: Option<&Value>) -> Option<[f32; 3]> {

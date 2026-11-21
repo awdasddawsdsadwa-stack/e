@@ -4,6 +4,7 @@
 use crate::scene::{NodeKind, Scene, TextureData as SceneTexture};
 use crate::ui::ShadingMode;
 use image::{DynamicImage, ImageFormat, RgbaImage};
+use std::borrow::Cow;
 use std::io::Cursor;
 use three_d::*;
 
@@ -64,7 +65,37 @@ impl Renderer {
                 NodeKind::Mesh { mesh, material, .. } if node.visible => (mesh, material),
                 _ => continue,
             };
-            let cpu = cpu_mesh_from(mesh, &node.transform.matrix());
+            let mesh = if let Some(binding) = scene.skinning.get(&node.id) {
+                let armature_node = scene.node(binding.armature);
+                match armature_node {
+                    Some(arm_node) => match &arm_node.kind {
+                        NodeKind::Armature { armature, pose } => {
+                            let pose_matrices = armature.pose_matrices(pose);
+                            let inverse_binds: Vec<_> =
+                                armature.bones.iter().map(|bone| bone.inverse_bind).collect();
+                            let mut skinned = mesh.clone();
+                            for (position, (joints, weights)) in skinned.positions.iter_mut().zip(
+                                binding.joints.iter().zip(binding.weights.iter()),
+                            ) {
+                                *position = crate::rig::skin_vertex(
+                                    glam::Vec3::from(*position),
+                                    *joints,
+                                    *weights,
+                                    &pose_matrices,
+                                    &inverse_binds,
+                                )
+                                .to_array();
+                            }
+                            Cow::Owned(skinned)
+                        }
+                        _ => Cow::Borrowed(mesh),
+                    },
+                    None => Cow::Borrowed(mesh),
+                }
+            } else {
+                Cow::Borrowed(mesh)
+            };
+            let cpu = cpu_mesh_from(&mesh, &node.transform.matrix());
             let srgba = srgba(&material.base_color);
 
             match shading {

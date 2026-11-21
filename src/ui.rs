@@ -78,6 +78,7 @@ pub fn draw_ui(
     let revision_before = scene.revision;
 
     outliner(root_ui, scene);
+    pose_panel(root_ui, scene, ui_state.mode);
     inspector(root_ui, scene);
     timeline(root_ui, scene);
 
@@ -212,12 +213,60 @@ fn outliner(root_ui: &mut Ui, scene: &mut Scene) {
         });
 }
 
+fn pose_panel(root_ui: &mut Ui, scene: &mut Scene, mode: AppMode) {
+    if mode != AppMode::Pose {
+        return;
+    }
+    Panel::left("pose_panel")
+        .default_size(210.0)
+        .show_inside(root_ui, |ui| {
+            ui.heading("Pose Mode");
+            ui.separator();
+            let id = scene.selected;
+            let mut names = Vec::new();
+            let mut current = Vec::new();
+            if let Some(id) = id {
+                if let Some(node) = scene.node(id) {
+                    if let NodeKind::Armature { armature, pose } = &node.kind {
+                        names = armature.bones.iter().map(|bone| bone.name.clone()).collect::<Vec<_>>();
+                        current = pose.clone();
+                    }
+                }
+            }
+            if names.is_empty() {
+                ui.label(egui::RichText::new("Select an armature").weak().italics());
+                return;
+            }
+            let Some(id) = id else { return; };
+            let mut edits: Vec<(usize, Transform)> = Vec::new();
+            for (index, name) in names.iter().enumerate() {
+                ui.label(egui::RichText::new(name).small());
+                let mut transform = current.get(index).copied().unwrap_or_default();
+                let mut euler = transform.euler();
+                ui.horizontal(|ui| {
+                    for (axis_index, axis) in ["X", "Y", "Z"].iter().enumerate() {
+                        ui.label(*axis);
+                        ui.add(DragValue::new(&mut euler[axis_index]).speed(0.01));
+                    }
+                });
+                if euler != transform.euler() {
+                    transform.set_euler(euler[0], euler[1], euler[2]);
+                    edits.push((index, transform));
+                }
+            }
+            for (index, transform) in edits {
+                let _ = scene.set_bone_pose(id, index, transform);
+            }
+        });
+}
+
 fn icon_for(kind: &NodeKind) -> &'static str {
     match kind {
         NodeKind::Empty => "◇",
         NodeKind::Mesh { .. } => "▲",
         NodeKind::Camera => "▣",
         NodeKind::Light { .. } => "☀",
+        NodeKind::Armature { .. } => "✳",
     }
 }
 
@@ -377,6 +426,7 @@ fn kind_name(kind: &NodeKind) -> &'static str {
         NodeKind::Mesh { .. } => "Mesh",
         NodeKind::Camera => "Camera",
         NodeKind::Light { .. } => "Light",
+        NodeKind::Armature { .. } => "Armature",
     }
 }
 
