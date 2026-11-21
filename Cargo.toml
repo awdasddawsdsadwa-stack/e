@@ -1,0 +1,22 @@
+[package]
+name = "forge"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Blender-inspired 3D editor with a built-in MCP server, OpenGL 3.3 safe"
+license = "MIT"
+
+[dependencies]
+# three-d 0.19 pins egui 0.34; its re-export (three_d::egui) is the matching version.
+three-d = { version = "0.19.0", features = ["egui-gui"] }
+tokio = { version = "1.54.1", features = ["io-util", "io-std", "rt", "macros", "sync", "time"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+glam = "0.34.3"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+gltf = "1.4.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
