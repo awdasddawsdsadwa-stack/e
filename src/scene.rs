@@ -934,22 +934,28 @@ impl OrbitCamera {
             )
     }
 
+    /// Drag left/right orbits the scene in the same direction as the pointer.
     pub fn orbit(&mut self, dx: f32, dy: f32) {
-        self.yaw -= dx * 0.006;
-        self.pitch = (self.pitch + dy * 0.006).clamp(-1.5, 1.5);
+        self.yaw += dx * 0.006;
+        self.pitch = (self.pitch - dy * 0.006).clamp(-1.5, 1.5);
     }
 
+    /// Drag pans the scene with the pointer (Blender-style middle/right drag).
     pub fn pan(&mut self, dx: f32, dy: f32) {
         let forward = (self.target - self.position()).normalize();
         let right = forward.cross(Vec3::Y).normalize();
         let up = right.cross(forward).normalize();
         let speed = self.distance * 0.0015;
-        self.target -= right * dx * speed;
-        self.target += up * dy * speed;
+        self.target += right * dx * speed;
+        self.target -= up * dy * speed;
     }
 
+    /// Wheel delta can arrive in lines (~1) or pixels (~120). Normalise both,
+    /// then apply an exponential step so zooming feels smooth, not snappy.
     pub fn zoom(&mut self, delta: f32) {
-        self.distance = (self.distance * (1.0 + delta * 0.1)).clamp(0.5, 500.0);
+        let steps = if delta.abs() > 2.0 { delta / 120.0 } else { delta };
+        let factor = (-steps * 0.15).exp();
+        self.distance = (self.distance * factor).clamp(0.5, 500.0);
     }
 
     pub fn focus(&mut self, point: Vec3) {
