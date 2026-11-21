@@ -127,12 +127,21 @@ fn main() {
                         .unwrap_or("current")
                         .to_string();
                     match view.as_str() {
+                        // Yaw places the camera around the target: 0 => +X, PI/2 => +Z.
                         "front" => {
-                            camera.yaw = 0.0;
+                            camera.yaw = std::f32::consts::FRAC_PI_2;
+                            camera.pitch = 0.0;
+                        }
+                        "back" => {
+                            camera.yaw = -std::f32::consts::FRAC_PI_2;
                             camera.pitch = 0.0;
                         }
                         "right" => {
-                            camera.yaw = std::f32::consts::FRAC_PI_2;
+                            camera.yaw = 0.0;
+                            camera.pitch = 0.0;
+                        }
+                        "left" => {
+                            camera.yaw = std::f32::consts::PI;
                             camera.pitch = 0.0;
                         }
                         "top" => {
@@ -1265,7 +1274,8 @@ GROUND CONTACT: 'ground' in bounds is derived from the AABB's lowest point (min.
 object on the ground, set its centre Y to half its height (a 4x0.6x1 box -> centre y=0.3).\n\
 SELF-CHECK PROCEDURE: 1) build with build_model or spawn_primitive; 2) call get_scene_info and\n\
 check every part's size and ground status; 3) call render_viewport_snapshot with views\n\
-'front', 'right', 'top' and 'three_quarter' to see it from several angles; 4) fix anything\n\
+'front' (from +Z), 'right' (from +X), 'top' and 'three_quarter' to see it from several angles;\n\
+4) fix anything\n\
 floating, below ground, or zero-thickness; 5) finish with get_scene_hierarchy.\n\
 NEVER stack zero-thickness planes to fake a solid, leave parts floating, or guess scale\n\
 without reading back bounds. Use get_object_info to inspect one part in detail.\n";

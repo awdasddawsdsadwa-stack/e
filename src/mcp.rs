@@ -326,8 +326,8 @@ fn tool_definitions() -> Vec<Value> {
                     "height": { "type": "integer", "description": "Pixel height, clamped to 64..1024 (default = width)." },
                     "view": {
                         "type": "string",
-                        "enum": ["current", "front", "right", "top", "three_quarter"],
-                        "description": "Optional camera preset for a multi-angle check (default current)."
+                        "enum": ["current", "front", "back", "left", "right", "top", "three_quarter"],
+                        "description": "Optional camera preset for a multi-angle check (default current). front views from +Z, right from +X, back from -Z, left from -X, top from +Y."
                     }
                 },
                 "additionalProperties": false
