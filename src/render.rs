@@ -15,6 +15,7 @@ pub struct Renderer {
     lit: Vec<Gm<Mesh, PhysicalMaterial>>,
     unlit: Vec<Gm<Mesh, ColorMaterial>>,
     wires: Vec<Wireframe>,
+    bones: Vec<Gm<Mesh, ColorMaterial>>,
     selection: Vec<Wireframe>,
     grid: Gm<Mesh, ColorMaterial>,
     ambient: AmbientLight,
@@ -38,6 +39,7 @@ impl Renderer {
             lit: Vec::new(),
             unlit: Vec::new(),
             wires: Vec::new(),
+            bones: Vec::new(),
             selection: Vec::new(),
             grid,
             ambient,
@@ -58,7 +60,25 @@ impl Renderer {
         self.lit.clear();
         self.unlit.clear();
         self.wires.clear();
+        self.bones.clear();
         self.selection.clear();
+
+        for node in &scene.nodes {
+            if let NodeKind::Armature { armature, pose } = &node.kind {
+                for index in 0..armature.bones.len() {
+                    let (head, tail) = armature.bone_head_tail(index, pose);
+                    let mut cpu = CpuMesh::cube();
+                    let _ = cpu.transform(bone_matrix(head, tail));
+                    self.bones.push(Gm::new(
+                        Mesh::new(&self.context, &cpu),
+                        ColorMaterial {
+                            color: Srgba::new_opaque(90, 200, 255),
+                            ..Default::default()
+                        },
+                    ));
+                }
+            }
+        }
 
         for node in &scene.nodes {
             let (mesh, material) = match &node.kind {
@@ -239,6 +259,9 @@ impl Renderer {
         if !self.selection.is_empty() {
             target_rt.render(&snapshot_camera, &self.selection, &[]);
         }
+        if !self.bones.is_empty() {
+            target_rt.render(&snapshot_camera, &self.bones, &[]);
+        }
         target_rt.render(&snapshot_camera, &[&self.grid], &[]);
 
         let pixels: Vec<[u8; 4]> = target_rt.read_color();
@@ -292,6 +315,9 @@ impl Renderer {
         if !self.selection.is_empty() {
             target = target.render(&mut *camera, &self.selection, &[]);
         }
+        if !self.bones.is_empty() {
+            target = target.render(&mut *camera, &self.bones, &[]);
+        }
         if show_grid {
             target = target.render(&mut *camera, &[&self.grid], &[]);
         }
@@ -306,6 +332,30 @@ fn srgba(color: &[f32; 4]) -> Srgba {
         (color[1].clamp(0.0, 1.0) * 255.0) as u8,
         (color[2].clamp(0.0, 1.0) * 255.0) as u8,
         (color[3].clamp(0.0, 1.0) * 255.0) as u8,
+    )
+}
+
+/// Thin box spanning a bone's head and tail, used for pose-mode visualization.
+fn bone_matrix(head: glam::Vec3, tail: glam::Vec3) -> Mat4 {
+    let direction = tail - head;
+    let length = direction.length().max(0.01);
+    let axis = if direction.length_squared() > 1e-8 {
+        direction.normalize()
+    } else {
+        glam::Vec3::Y
+    };
+    let rotation = glam::Quat::from_rotation_arc(glam::Vec3::Y, axis);
+    let matrix = glam::Mat4::from_scale_rotation_translation(
+        glam::Vec3::new(0.05, length, 0.05),
+        rotation,
+        (head + tail) * 0.5,
+    );
+    let values = matrix.to_cols_array();
+    Mat4::from_cols(
+        vec4(values[0], values[1], values[2], values[3]),
+        vec4(values[4], values[5], values[6], values[7]),
+        vec4(values[8], values[9], values[10], values[11]),
+        vec4(values[12], values[13], values[14], values[15]),
     )
 }
 
