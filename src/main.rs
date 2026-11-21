@@ -17,7 +17,7 @@ use base64::Engine as _;
 use capabilities::GpuProfile;
 use ipc::AppCommand;
 use render::Renderer;
-use scene::{History, Material, MeshData, NodeId, NodeKind, OrbitCamera, PrimitiveKind, Scene, TextureData, Transform};
+use scene::{History, LightType, Material, MeshData, NodeId, NodeKind, OrbitCamera, PrimitiveKind, Scene, TextureData, Transform};
 use serde_json::{json, Value};
 use texture::{Pattern as TexturePattern, TextureOptions};
 use three_d::*;
@@ -71,6 +71,42 @@ fn main() {
         while let Ok(command) = command_rx.try_recv() {
             match command.method.as_str() {
                 "set_camera" => handle_camera_command(command, &mut camera),
+                "focus_selection" => {
+                    if let Some(id) = scene.selected {
+                        if let Some(node) = scene.node(id) {
+                            let p = node.transform.position;
+                            camera.focus(glam::Vec3::new(p[0], p[1], p[2]));
+                        }
+                    }
+                    let _ = command.reply.send(Ok(json!({
+                        "target": camera.target.to_array(),
+                        "selected": scene.selected,
+                    })));
+                }
+                "get_viewport_info" => {
+                    let _ = command.reply.send(Ok(json!({
+                        "camera": {
+                            "target": camera.target.to_array(),
+                            "distance": camera.distance,
+                            "yaw": camera.yaw,
+                            "pitch": camera.pitch,
+                            "position": camera.position().to_array(),
+                        },
+                        "editor": {
+                            "shading": ui_state.shading.label(),
+                            "mode": ui_state.mode.label(),
+                            "show_grid": ui_state.show_grid,
+                            "status": ui_state.status,
+                        },
+                        "gpu": gpu_summary,
+                        "scene": {
+                            "nodes": scene.nodes.len(),
+                            "selected": scene.selected,
+                            "can_undo": history.can_undo(),
+                            "can_redo": history.can_redo(),
+                        },
+                    })));
+                }
                 "render_viewport_snapshot" => {
                     let width = command
                         .params
@@ -715,6 +751,299 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
                 "name": scene.node(copy_id).map(|n| n.name.clone()).unwrap_or_default(),
                 "source": id,
             }))
+        }
+
+        "get_object_info" => {
+            let Some(id) = resolve_id(scene, &command.params) else {
+                return_fail(command, "Node not found");
+                return;
+            };
+            match scene.node(id) {
+                Some(node) => Ok(node.to_json()),
+                None => Err("Node not found".into()),
+            }
+        }
+
+        "delete_object" => {
+            let Some(id) = resolve_id(scene, &command.params) else {
+                return_fail(command, "Node not found");
+                return;
+            };
+            history.push(scene);
+            if scene.delete_node(id) {
+                Ok(json!({ "id": id, "deleted": true }))
+            } else {
+                Err("Node not found".into())
+            }
+        }
+
+        "rename_object" => {
+            let Some(id) = resolve_id(scene, &command.params) else {
+                return_fail(command, "Node not found");
+                return;
+            };
+            let new_name = command
+                .params
+                .get("new_name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if new_name.is_empty() {
+                return_fail(command, "'new_name' must be a non-empty string");
+                return;
+            }
+            history.push(scene);
+            if scene.set_node_name(id, new_name.clone()) {
+                Ok(json!({ "id": id, "name": new_name }))
+            } else {
+                Err("Node not found".into())
+            }
+        }
+
+        "set_object_visibility" => {
+            let Some(id) = resolve_id(scene, &command.params) else {
+                return_fail(command, "Node not found");
+                return;
+            };
+            let Some(visible) = command.params.get("visible").and_then(Value::as_bool) else {
+                return_fail(command, "'visible' must be a boolean");
+                return;
+            };
+            history.push(scene);
+            if scene.set_visible(id, visible) {
+                Ok(json!({ "id": id, "visible": visible }))
+            } else {
+                Err("Node not found".into())
+            }
+        }
+
+        "select_object" => {
+            let Some(id) = resolve_id(scene, &command.params) else {
+                return_fail(command, "Node not found");
+                return;
+            };
+            if scene.node(id).is_some() {
+                scene.selected = Some(id);
+                Ok(json!({
+                    "id": id,
+                    "name": scene.node(id).map(|n| n.name.clone()).unwrap_or_default(),
+                }))
+            } else {
+                Err("Node not found".into())
+            }
+        }
+
+        "apply_modifier" => {
+            let Some(id) = resolve_id(scene, &command.params) else {
+                return_fail(command, "Node not found");
+                return;
+            };
+            let op = command
+                .params
+                .get("operation")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let outcome: Result<(), String> = match op.as_str() {
+                "mirror" => {
+                    let axis = command.params.get("axis").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    match scene.mesh_mut(id) {
+                        Some(mesh) => mesh_ops::mirror(mesh, axis),
+                        None => Err("Node is not a mesh".into()),
+                    }
+                }
+                "array" => {
+                    let count = command.params.get("count").and_then(Value::as_u64).unwrap_or(3) as u32;
+                    let offset = parse_array3(command.params.get("offset")).unwrap_or([2.0, 0.0, 0.0]);
+                    let Some(source) = scene.mesh(id).cloned() else {
+                        return_fail(command, "Node is not a mesh");
+                        return;
+                    };
+                    let combined = mesh_ops::array(&source, count, offset);
+                    match scene.mesh_mut(id) {
+                        Some(mesh) => {
+                            *mesh = combined;
+                            Ok(())
+                        }
+                        None => Err("Node is not a mesh".into()),
+                    }
+                }
+                "solidify" => {
+                    let thickness = command.params.get("thickness").and_then(Value::as_f64).unwrap_or(0.1) as f32;
+                    match scene.mesh_mut(id) {
+                        Some(mesh) => mesh_ops::solidify(mesh, thickness),
+                        None => Err("Node is not a mesh".into()),
+                    }
+                }
+                "smooth" => {
+                    let factor = command.params.get("factor").and_then(Value::as_f64).unwrap_or(0.5) as f32;
+                    let iterations = command.params.get("iterations").and_then(Value::as_u64).unwrap_or(1) as u32;
+                    match scene.mesh_mut(id) {
+                        Some(mesh) => mesh_ops::smooth(mesh, factor, iterations),
+                        None => Err("Node is not a mesh".into()),
+                    }
+                }
+                "triangulate" => match scene.mesh_mut(id) {
+                    Some(mesh) => mesh_ops::triangulate(mesh),
+                    None => Err("Node is not a mesh".into()),
+                },
+                "subdivide" => {
+                    let levels = command.params.get("levels").and_then(Value::as_u64).unwrap_or(1).min(3) as u32;
+                    match scene.mesh_mut(id) {
+                        Some(mesh) => mesh_ops::subdivide(mesh, levels),
+                        None => Err("Node is not a mesh".into()),
+                    }
+                }
+                "extrude" => {
+                    let direction = parse_array3(command.params.get("direction")).unwrap_or([0.0, 1.0, 0.0]);
+                    let distance = command.params.get("distance").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+                    match scene.mesh_mut(id) {
+                        Some(mesh) => mesh_ops::extrude(mesh, direction, distance),
+                        None => Err("Node is not a mesh".into()),
+                    }
+                }
+                "recalculate_normals" => match scene.mesh_mut(id) {
+                    Some(mesh) => {
+                        mesh_ops::recalculate_normals(mesh);
+                        Ok(())
+                    }
+                    None => Err("Node is not a mesh".into()),
+                },
+                other => Err(format!("Unknown modifier: {other}")),
+            };
+            match outcome {
+                Ok(()) => {
+                    scene.revision += 1;
+                    Ok(json!({
+                        "id": id,
+                        "operation": op,
+                        "vertices": scene.mesh(id).map(|m| m.positions.len()).unwrap_or(0),
+                        "triangles": scene.mesh(id).map(|m| m.indices.len() / 3).unwrap_or(0),
+                    }))
+                }
+                Err(message) => Err(message),
+            }
+        }
+
+        "set_material_preset" => {
+            let Some(id) = resolve_id(scene, &command.params) else {
+                return_fail(command, "Node not found");
+                return;
+            };
+            let preset = command
+                .params
+                .get("preset")
+                .and_then(Value::as_str)
+                .unwrap_or("plastic")
+                .to_string();
+            let (color, roughness, metallic) = match preset.as_str() {
+                "plastic" => ([0.80, 0.80, 0.85, 1.0], 0.35, 0.0),
+                "matte" => ([0.70, 0.70, 0.70, 1.0], 0.90, 0.0),
+                "metal" => ([0.60, 0.60, 0.65, 1.0], 0.30, 0.85),
+                "chrome" => ([0.90, 0.90, 0.95, 1.0], 0.05, 1.0),
+                "glass" => ([0.60, 0.80, 0.90, 0.35], 0.05, 0.0),
+                "rubber" => ([0.08, 0.08, 0.09, 1.0], 0.95, 0.0),
+                "gold" => ([0.85, 0.65, 0.20, 1.0], 0.20, 1.0),
+                "ceramic" => ([0.95, 0.95, 0.92, 1.0], 0.15, 0.0),
+                "emissive" => ([1.0, 0.60, 0.20, 1.0], 0.40, 0.0),
+                other => {
+                    return_fail(command, &format!("Unknown preset: {other}"));
+                    return;
+                }
+            };
+            let color = parse_array4(command.params.get("color")).unwrap_or(color);
+            history.push(scene);
+            let applied = {
+                if let Some(material) = scene.material_mut(id) {
+                    material.base_color = color;
+                    material.roughness = roughness;
+                    material.metallic = metallic;
+                    Some(material.summary_json())
+                } else {
+                    None
+                }
+            };
+            match applied {
+                Some(summary) => {
+                    scene.revision += 1;
+                    Ok(json!({ "id": id, "preset": preset, "material": summary }))
+                }
+                None => Err("Node is not a mesh".into()),
+            }
+        }
+
+        "create_light" => {
+            let kind = command
+                .params
+                .get("light_type")
+                .and_then(Value::as_str)
+                .unwrap_or("directional")
+                .to_string();
+            let light_type = match kind.as_str() {
+                "directional" => LightType::Directional,
+                "point" => LightType::Point,
+                "ambient" => LightType::Ambient,
+                other => {
+                    return_fail(command, &format!("Unknown light type: {other}"));
+                    return;
+                }
+            };
+            let name = command.params.get("name").and_then(Value::as_str).map(str::to_string);
+            let position = parse_array3(command.params.get("position"));
+            let color3 = parse_array3(command.params.get("color"));
+            let intensity = command.params.get("intensity").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+            history.push(scene);
+            let id = scene.spawn_light(light_type, name);
+            if let Some(p) = position {
+                let _ = scene.transform_object(id, Some(p), None, None);
+            }
+            if let Some(node) = scene.node_mut(id) {
+                if let NodeKind::Light { color, intensity: slot, .. } = &mut node.kind {
+                    if let Some(c) = color3 {
+                        *color = c;
+                    }
+                    *slot = intensity;
+                }
+            }
+            scene.revision += 1;
+            Ok(json!({
+                "id": id,
+                "name": scene.node(id).map(|n| n.name.clone()).unwrap_or_default(),
+                "light_type": kind,
+            }))
+        }
+
+        "set_light" => {
+            let Some(id) = resolve_id(scene, &command.params) else {
+                return_fail(command, "Light not found");
+                return;
+            };
+            let is_light = scene.node(id).is_some_and(|n| matches!(n.kind, NodeKind::Light { .. }));
+            if !is_light {
+                return_fail(command, "Node is not a light");
+                return;
+            }
+            let color3 = parse_array3(command.params.get("color"));
+            let intensity = command.params.get("intensity").and_then(Value::as_f64).map(|v| v as f32);
+            let position = parse_array3(command.params.get("position"));
+            history.push(scene);
+            {
+                if let Some(node) = scene.node_mut(id) {
+                    if let NodeKind::Light { color, intensity: slot, .. } = &mut node.kind {
+                        if let Some(c) = color3 {
+                            *color = c;
+                        }
+                        if let Some(value) = intensity {
+                            *slot = value;
+                        }
+                    }
+                    if let Some(p) = position {
+                        node.transform.position = p;
+                    }
+                }
+            }
+            scene.revision += 1;
+            Ok(json!({ "id": id, "light": scene.node(id).map(|n| n.to_json()).unwrap_or_default() }))
         }
 
         "undo" => {

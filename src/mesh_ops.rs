@@ -443,6 +443,265 @@ pub fn recalculate_normals(mesh: &mut MeshData) {
     mesh.recalculate_normals();
 }
 
+/// Mirror geometry across the plane perpendicular to `axis` (0=X, 1=Y, 2=Z)
+/// at coordinate zero.
+///
+/// The result is the original mesh followed by a mirrored copy: positions and
+/// normals have their `axis` component negated, UVs are preserved, and the
+/// mirrored copy has reversed triangle winding so it stays outward-facing.
+pub fn mirror(mesh: &mut MeshData, axis: usize) -> Result<(), String> {
+    if axis > 2 {
+        return Err(format!("Mirror axis {axis} is out of range (expected 0, 1 or 2)"));
+    }
+    if mesh.positions.is_empty() {
+        return Err("Cannot mirror an empty mesh".to_string());
+    }
+
+    let base_v = mesh.positions.len() as u32;
+    let normals = normals_of(mesh);
+    let uvs = uvs_of(mesh);
+    let old_positions = mesh.positions.clone();
+    let old_indices = mesh.indices.clone();
+
+    let mut positions = Vec::with_capacity(old_positions.len() * 2);
+    let mut out_normals = Vec::with_capacity(old_positions.len() * 2);
+    let mut out_uvs = Vec::with_capacity(old_positions.len() * 2);
+    let mut indices = Vec::with_capacity(old_indices.len() * 2);
+
+    // Original half, untouched.
+    positions.extend_from_slice(&old_positions);
+    out_normals.extend_from_slice(&normals);
+    out_uvs.extend_from_slice(&uvs);
+    indices.extend_from_slice(&old_indices);
+
+    // Mirrored half: negate the axis component of positions and normals.
+    for i in 0..old_positions.len() {
+        let mut p = old_positions[i];
+        p[axis] = -p[axis];
+        positions.push(p);
+
+        let mut n = normals[i];
+        n[axis] = -n[axis];
+        out_normals.push(n);
+
+        out_uvs.push(uvs[i]);
+    }
+    for tri in old_indices.chunks(3) {
+        if tri.len() == 3 {
+            indices.extend_from_slice(&[tri[0] + base_v, tri[2] + base_v, tri[1] + base_v]);
+        } else {
+            indices.extend(tri.iter().map(|&i| i + base_v));
+        }
+    }
+
+    *mesh = MeshData {
+        positions,
+        normals: out_normals,
+        uvs: out_uvs,
+        indices,
+    };
+    Ok(())
+}
+
+/// Return a new mesh holding `count` copies of `mesh`, each translated by
+/// `offset * i`. Normals and UVs are preserved and indices are offset into the
+/// correct copy. `count` is clamped to `1..=64`; empty meshes yield an empty
+/// result.
+pub fn array(mesh: &MeshData, count: u32, offset: [f32; 3]) -> MeshData {
+    let count = count.clamp(1, 64) as usize;
+    let mut out = MeshData::empty();
+    if mesh.positions.is_empty() {
+        return out;
+    }
+
+    let base_v = mesh.positions.len();
+    let normals = normals_of(mesh);
+    let uvs = uvs_of(mesh);
+    out.positions.reserve(base_v * count);
+    out.normals.reserve(base_v * count);
+    out.uvs.reserve(base_v * count);
+    out.indices.reserve(mesh.indices.len() * count);
+
+    let step = vec3(offset);
+    for i in 0..count {
+        let base = (i * base_v) as u32;
+        let shift = step * i as f32;
+        for &p in &mesh.positions {
+            out.positions.push(array3(vec3(p) + shift));
+        }
+        out.normals.extend_from_slice(&normals);
+        out.uvs.extend_from_slice(&uvs);
+        out.indices.extend(mesh.indices.iter().map(|&idx| idx + base));
+    }
+    out
+}
+
+/// Build a closed thin shell: keep the original outer shell, add an inner
+/// shell offset along `-normal` by `thickness` with reversed winding, and
+/// stitch boundary edges with quads (two triangles each).
+///
+/// Boundary walls get their own four vertices so their normal stays flat,
+/// matching [`extrude`]. Returns an error for an empty mesh or zero/non-finite
+/// thickness.
+pub fn solidify(mesh: &mut MeshData, thickness: f32) -> Result<(), String> {
+    if mesh.positions.is_empty() || mesh.indices.is_empty() {
+        return Err("Cannot solidify an empty mesh".to_string());
+    }
+    if thickness == 0.0 || !thickness.is_finite() {
+        return Err("Solidify thickness must be a non-zero, finite value".to_string());
+    }
+
+    let base_v = mesh.positions.len() as u32;
+    let normals = normals_of(mesh);
+    let uvs = uvs_of(mesh);
+    let old_positions = mesh.positions.clone();
+    let old_indices = mesh.indices.clone();
+
+    let mut positions = Vec::with_capacity(old_positions.len() * 2);
+    let mut out_normals = Vec::with_capacity(old_positions.len() * 2);
+    let mut out_uvs = Vec::with_capacity(old_positions.len() * 2);
+    let mut indices = Vec::with_capacity(old_indices.len() * 2);
+
+    // Outer shell, unchanged.
+    positions.extend_from_slice(&old_positions);
+    out_normals.extend_from_slice(&normals);
+    out_uvs.extend_from_slice(&uvs);
+    indices.extend_from_slice(&old_indices);
+
+    // Inner shell: offset along -normal, reversed winding.
+    for (i, &p) in old_positions.iter().enumerate() {
+        let inward = normalized_or(vec3(normals[i]), Vec3::Y) * thickness;
+        positions.push(array3(vec3(p) - inward));
+        out_normals.push(normals[i]);
+        out_uvs.push(uvs[i]);
+    }
+    for tri in old_indices.chunks(3) {
+        if tri.len() == 3 {
+            indices.extend_from_slice(&[tri[0] + base_v, tri[2] + base_v, tri[1] + base_v]);
+        } else {
+            indices.extend(tri.iter().map(|&i| i + base_v));
+        }
+    }
+
+    // Undirected edges used by exactly one triangle are boundary edges. Keep
+    // the directed form from that triangle so the wall winding closes cleanly.
+    struct BoundaryEdge {
+        a: u32,
+        b: u32,
+        count: usize,
+    }
+    let mut edges: HashMap<(u32, u32), BoundaryEdge> = HashMap::new();
+    for tri in old_indices.chunks_exact(3) {
+        let ids = [tri[0], tri[1], tri[2]];
+        for &(u, v) in &[(ids[0], ids[1]), (ids[1], ids[2]), (ids[2], ids[0])] {
+            let key = if u <= v { (u, v) } else { (v, u) };
+            let entry = edges
+                .entry(key)
+                .or_insert(BoundaryEdge { a: u, b: v, count: 0 });
+            entry.count += 1;
+        }
+    }
+    let mut boundary: Vec<BoundaryEdge> =
+        edges.into_values().filter(|e| e.count == 1).collect();
+    boundary.sort_by_key(|e| (e.a, e.b));
+
+    for e in boundary {
+        let pa = vec3(old_positions[e.a as usize]);
+        let pb = vec3(old_positions[e.b as usize]);
+        let ia = vec3(positions[base_v as usize + e.a as usize]);
+        let ib = vec3(positions[base_v as usize + e.b as usize]);
+        let inward = (ia - pa + (ib - pb)) * 0.5;
+        let wall_normal = normalized_or(inward.cross(pb - pa), Vec3::Y);
+
+        let start = positions.len() as u32;
+        // Order: outer-a, inner-a, inner-b, outer-b.
+        positions.extend_from_slice(&[array3(pa), array3(ia), array3(ib), array3(pb)]);
+        out_normals.extend_from_slice(&[array3(wall_normal); 4]);
+        out_uvs.extend_from_slice(&[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
+        indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+    }
+
+    *mesh = MeshData {
+        positions,
+        normals: out_normals,
+        uvs: out_uvs,
+        indices,
+    };
+    Ok(())
+}
+
+/// Laplacian smoothing: repeatedly move every vertex toward the average of
+/// its (unique) connected neighbours by `factor`. `factor` is clamped to
+/// `0.0..=1.0` and `iterations` to `0..=10`. Normals are recalculated at the
+/// end. Returns an error for an empty mesh.
+pub fn smooth(mesh: &mut MeshData, factor: f32, iterations: u32) -> Result<(), String> {
+    if mesh.positions.is_empty() {
+        return Err("Cannot smooth an empty mesh".to_string());
+    }
+
+    let factor = if factor.is_finite() {
+        factor.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let iterations = iterations.min(10);
+
+    if iterations > 0 && factor > 0.0 {
+        let vertex_count = mesh.positions.len();
+        for _ in 0..iterations {
+            let mut neighbours: Vec<Vec<usize>> = vec![Vec::new(); vertex_count];
+            for tri in mesh.indices.chunks_exact(3) {
+                let ids = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+                if ids.iter().any(|&i| i >= vertex_count) {
+                    continue;
+                }
+                for &(a, b) in &[(ids[0], ids[1]), (ids[1], ids[2]), (ids[2], ids[0])] {
+                    neighbours[a].push(b);
+                    neighbours[b].push(a);
+                }
+            }
+            for ns in &mut neighbours {
+                ns.sort_unstable();
+                ns.dedup();
+            }
+
+            let mut new_positions = mesh.positions.clone();
+            for (i, &p) in mesh.positions.iter().enumerate() {
+                let ns = &neighbours[i];
+                if ns.is_empty() {
+                    continue;
+                }
+                let mut sum = Vec3::ZERO;
+                for &j in ns {
+                    sum += vec3(mesh.positions[j]);
+                }
+                let average = sum / ns.len() as f32;
+                let current = vec3(p);
+                new_positions[i] = array3(current + (average - current) * factor);
+            }
+            mesh.positions = new_positions;
+        }
+    }
+
+    mesh.recalculate_normals();
+    Ok(())
+}
+
+/// Validation / normalisation pass: copy `indices` as triangle chunks. Returns
+/// an error when the index buffer ends in a chunk with fewer than three
+/// entries.
+pub fn triangulate(mesh: &mut MeshData) -> Result<(), String> {
+    let mut indices = Vec::with_capacity(mesh.indices.len());
+    for tri in mesh.indices.chunks(3) {
+        if tri.len() < 3 {
+            return Err(format!("Trailing {} index/indices do not form a triangle", tri.len()));
+        }
+        indices.extend_from_slice(&[tri[0], tri[1], tri[2]]);
+    }
+    mesh.indices = indices;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -603,5 +862,172 @@ mod tests {
         let mut mesh = triangle();
         assert!(extrude(&mut mesh, [0.0, 0.0, 0.0], 1.0).is_err());
         assert!(extrude(&mut mesh, [f32::NAN, 0.0, 0.0], 1.0).is_err());
+    }
+
+    fn asymmetric_triangle() -> MeshData {
+        MeshData {
+            positions: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+            normals: vec![[1.0, 2.0, 3.0]; 3],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2],
+        }
+    }
+
+    #[test]
+    fn mirror_doubles_geometry_and_negates_axis() {
+        for axis in 0..3 {
+            let mut mesh = asymmetric_triangle();
+            mirror(&mut mesh, axis).unwrap();
+
+            assert_eq!(mesh.positions.len(), 6);
+            assert_eq!(mesh.normals.len(), 6);
+            assert_eq!(mesh.uvs.len(), 6);
+            assert_eq!(mesh.indices.len(), 6);
+
+            for i in 0..3 {
+                for c in 0..3 {
+                    let expected_p = if c == axis {
+                        -mesh.positions[i][c]
+                    } else {
+                        mesh.positions[i][c]
+                    };
+                    let expected_n = if c == axis {
+                        -mesh.normals[i][c]
+                    } else {
+                        mesh.normals[i][c]
+                    };
+                    assert!((mesh.positions[i + 3][c] - expected_p).abs() < 1e-6);
+                    assert!((mesh.normals[i + 3][c] - expected_n).abs() < 1e-6);
+                }
+                assert_eq!(mesh.uvs[i + 3], mesh.uvs[i]);
+            }
+
+            // Original winding kept, mirrored winding reversed.
+            assert_eq!(&mesh.indices[..3], &[0, 1, 2]);
+            assert_eq!(&mesh.indices[3..], &[3, 5, 4]);
+        }
+    }
+
+    #[test]
+    fn mirror_rejects_invalid_axis_and_empty() {
+        assert!(mirror(&mut triangle(), 3).is_err());
+        assert!(mirror(&mut triangle(), usize::MAX).is_err());
+        assert!(mirror(&mut MeshData::empty(), 0).is_err());
+    }
+
+    #[test]
+    fn array_copies_translate_and_offset_indices() {
+        let mesh = triangle();
+        let out = array(&mesh, 3, [1.0, 2.0, 3.0]);
+
+        assert_eq!(out.positions.len(), 9);
+        assert_eq!(out.normals.len(), 9);
+        assert_eq!(out.uvs.len(), 9);
+        assert_eq!(out.indices.len(), 9);
+        assert_eq!(&out.indices[0..3], &[0, 1, 2]);
+        assert_eq!(&out.indices[3..6], &[3, 4, 5]);
+        assert_eq!(&out.indices[6..9], &[6, 7, 8]);
+
+        // Copy 0 is unchanged, copy i is translated by offset * i.
+        assert_eq!(out.positions[0], [0.0, 0.0, 0.0]);
+        assert_eq!(out.positions[3], [1.0, 2.0, 3.0]);
+        assert_eq!(out.positions[6], [2.0, 4.0, 6.0]);
+        assert_eq!(out.normals[4], [0.0, 0.0, 1.0]);
+        assert_eq!(out.uvs[4], [1.0, 0.0]);
+    }
+
+    #[test]
+    fn array_clamps_count_and_handles_empty() {
+        let mesh = triangle();
+        assert_eq!(array(&mesh, 0, [0.0; 3]).positions.len(), 3);
+        assert_eq!(array(&mesh, 100, [0.0; 3]).positions.len(), 3 * 64);
+        assert_eq!(array(&mesh, 100, [0.0; 3]).indices.len(), 3 * 64);
+
+        let empty = array(&MeshData::empty(), 4, [1.0, 1.0, 1.0]);
+        assert!(empty.positions.is_empty());
+        assert!(empty.normals.is_empty());
+        assert!(empty.uvs.is_empty());
+        assert!(empty.indices.is_empty());
+    }
+
+    #[test]
+    fn solidify_triangle_counts() {
+        let mut mesh = triangle();
+        solidify(&mut mesh, 0.1).unwrap();
+
+        // 3 outer + 3 inner + 3 boundary edges * 4 wall vertices = 18.
+        assert_eq!(mesh.positions.len(), 18);
+        // 2 shells * 1 triangle + 3 walls * 2 triangles = 8 triangles.
+        assert_eq!(mesh.indices.len(), 24);
+        assert_eq!(mesh.normals.len(), 18);
+        assert_eq!(mesh.uvs.len(), 18);
+
+        // Inner shell is displaced along -normal (the triangle normal is +Z).
+        assert!((mesh.positions[3][2] + 0.1).abs() < 1e-6);
+        // Inner winding is the reverse of the outer winding.
+        assert_eq!(&mesh.indices[3..6], &[3, 5, 4]);
+    }
+
+    #[test]
+    fn solidify_rejects_invalid_input() {
+        assert!(solidify(&mut MeshData::empty(), 0.1).is_err());
+        assert!(solidify(&mut triangle(), 0.0).is_err());
+        assert!(solidify(&mut triangle(), f32::NAN).is_err());
+    }
+
+    #[test]
+    fn smooth_moves_toward_neighbour_average() {
+        let mut mesh = MeshData {
+            positions: vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [1.0, 2.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            uvs: vec![[0.0, 0.0]; 3],
+            indices: vec![0, 1, 2],
+        };
+        smooth(&mut mesh, 1.0, 1).unwrap();
+
+        // Vertex 1 has neighbours 0 and 2; their average is (0.5, 1, 0).
+        assert!((mesh.positions[1][0] - 0.5).abs() < 1e-6);
+        assert!((mesh.positions[1][1] - 1.0).abs() < 1e-6);
+        assert_eq!(mesh.positions.len(), 3);
+        assert_eq!(mesh.normals.len(), 3);
+    }
+
+    #[test]
+    fn smooth_clamps_factor_and_recalculates_normals() {
+        let base = MeshData {
+            positions: vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [1.0, 2.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            uvs: vec![[0.0, 0.0]; 3],
+            indices: vec![0, 1, 2],
+        };
+        let mut clamped = base.clone();
+        let mut full = base.clone();
+        smooth(&mut clamped, 5.0, 1).unwrap();
+        smooth(&mut full, 1.0, 1).unwrap();
+        assert_eq!(clamped.positions, full.positions);
+
+        // Zero iterations is still a normal-recalculation pass.
+        let mut untouched = base;
+        untouched.normals.clear();
+        smooth(&mut untouched, 0.5, 0).unwrap();
+        assert_eq!(untouched.normals.len(), 3);
+        assert_eq!(untouched.positions[1], [2.0, 0.0, 0.0]);
+
+        assert!(smooth(&mut MeshData::empty(), 1.0, 1).is_err());
+    }
+
+    #[test]
+    fn triangulate_copies_chunks_and_rejects_partial_chunk() {
+        let mut mesh = quad();
+        triangulate(&mut mesh).unwrap();
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+
+        let mut bad = quad();
+        bad.indices.push(0);
+        assert!(triangulate(&mut bad).is_err());
+
+        let mut empty = MeshData::empty();
+        assert!(triangulate(&mut empty).is_ok());
+        assert!(empty.indices.is_empty());
     }
 }

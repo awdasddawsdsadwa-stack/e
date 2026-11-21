@@ -403,6 +403,155 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "get_object_info",
+            "description": "Get full details for one node by id or name: transform, visibility, material, geometry statistics and light properties.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "delete_object",
+            "description": "Delete a node from the scene. Undoable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "rename_object",
+            "description": "Rename a node.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "new_name": { "type": "string" }
+                },
+                "required": ["new_name"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "set_object_visibility",
+            "description": "Show or hide a node.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "visible": { "type": "boolean" }
+                },
+                "required": ["visible"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "select_object",
+            "description": "Select a node so later tools can omit id/name and so it is highlighted in the viewport.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "apply_modifier",
+            "description": "Blender-style mesh modifiers: mirror across an axis, array copies, solidify, smooth, triangulate, subdivide, extrude or recalculate normals.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "operation": {
+                        "type": "string",
+                        "enum": ["mirror", "array", "solidify", "smooth", "triangulate", "subdivide", "extrude", "recalculate_normals"]
+                    },
+                    "axis": { "type": "integer", "description": "mirror axis: 0=X, 1=Y, 2=Z" },
+                    "count": { "type": "integer", "description": "array copy count" },
+                    "offset": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "thickness": { "type": "number" },
+                    "factor": { "type": "number" },
+                    "iterations": { "type": "integer" },
+                    "direction": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "distance": { "type": "number" },
+                    "levels": { "type": "integer" }
+                },
+                "required": ["operation"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "set_material_preset",
+            "description": "Apply a named PBR material preset (plastic, matte, metal, chrome, glass, rubber, gold, ceramic, emissive).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "preset": {
+                        "type": "string",
+                        "enum": ["plastic", "matte", "metal", "chrome", "glass", "rubber", "gold", "ceramic", "emissive"]
+                    },
+                    "color": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 }
+                },
+                "required": ["preset"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "create_light",
+            "description": "Add a directional, point or ambient light to the scene.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "light_type": { "type": "string", "enum": ["directional", "point", "ambient"] },
+                    "name": { "type": "string" },
+                    "position": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "color": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "intensity": { "type": "number" }
+                },
+                "required": ["light_type"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "set_light",
+            "description": "Change a light's colour, intensity or position.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "color": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "intensity": { "type": "number" },
+                    "position": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "get_viewport_info",
+            "description": "Return editor state: camera orbit values, shading mode, grid toggle, detected GPU profile and scene counts.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": "focus_selection",
+            "description": "Move the orbit camera target to the selected object so the next screenshot frames it.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
             "name": "undo",
             "description": "Revert the most recent scene mutation.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
@@ -440,6 +589,17 @@ async fn call_tool(params: Value, tx: &CommandSender) -> Result<Value, (i64, Str
         "clear_scene",
         "duplicate_node",
         "set_camera",
+        "get_object_info",
+        "delete_object",
+        "rename_object",
+        "set_object_visibility",
+        "select_object",
+        "apply_modifier",
+        "set_material_preset",
+        "create_light",
+        "set_light",
+        "get_viewport_info",
+        "focus_selection",
         "undo",
         "redo",
     ];
