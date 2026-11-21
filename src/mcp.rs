@@ -597,6 +597,114 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         json!({
+            "name": "create_mesh_from_faces",
+            "description": "BLENDER-STYLE TOPOLOGY: build a mesh from explicit vertices and polygon faces (like bmesh.from_pydata). Prefer this over stacking primitives for complex shapes. Faces are arrays of vertex indices with 3 or more entries; they are triangulated automatically, with smooth normals and box UVs generated. Y-up, coordinates are local to the object.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "vertices": {
+                        "type": "array",
+                        "items": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                        "description": "Local vertex positions [[x,y,z], ...]."
+                    },
+                    "faces": {
+                        "type": "array",
+                        "items": { "type": "array", "items": { "type": "integer" } },
+                        "description": "Polygon faces as vertex index lists, e.g. [[0,1,2,3]]."
+                    },
+                    "color": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+                    "roughness": { "type": "number" },
+                    "metallic": { "type": "number" }
+                },
+                "required": ["vertices", "faces"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "get_mesh_topology",
+            "description": "Inspect a mesh's topology: vertex count, triangle count, edge count, and a list of triangles with their face indices and corner positions. Use face indices with extrude_faces/inset_faces.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "limit": { "type": "integer", "description": "Max triangles to list (default 100)." }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "extrude_faces",
+            "description": "BLENDER-STYLE EDIT MODE: extrude selected triangles along their averaged normal, creating real side walls. Get face indices from get_mesh_topology.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "faces": { "type": "array", "items": { "type": "integer" } },
+                    "distance": { "type": "number" }
+                },
+                "required": ["faces", "distance"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "inset_faces",
+            "description": "BLENDER-STYLE EDIT MODE: inset selected triangles toward their centroids and rebuild the border faces. Get face indices from get_mesh_topology.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "faces": { "type": "array", "items": { "type": "integer" } },
+                    "amount": { "type": "number" }
+                },
+                "required": ["faces", "amount"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "weld_vertices",
+            "description": "Merge vertices closer than epsilon (merge-by-distance) and recompute normals. Useful after building faces from separate pieces.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "epsilon": { "type": "number" }
+                },
+                "required": ["epsilon"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "flip_normals",
+            "description": "Reverse every triangle's winding and negate its normals — use when a mesh renders inside-out.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "bevel_mesh",
+            "description": "Approximate edge chamfer: pull each vertex toward its neighbours by amount and recompute normals. Gives a softer, low-poly bevel look.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "amount": { "type": "number" }
+                },
+                "required": ["amount"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "undo",
             "description": "Revert the most recent scene mutation.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
@@ -634,6 +742,13 @@ async fn call_tool(params: Value, tx: &CommandSender) -> Result<Value, (i64, Str
         "clear_scene",
         "duplicate_node",
         "set_camera",
+        "create_mesh_from_faces",
+        "get_mesh_topology",
+        "extrude_faces",
+        "inset_faces",
+        "weld_vertices",
+        "flip_normals",
+        "bevel_mesh",
         "get_scene_info",
         "get_modeling_guide",
         "set_dimensions",

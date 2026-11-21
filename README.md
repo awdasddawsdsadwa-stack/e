@@ -51,9 +51,26 @@ Example MCP handshake:
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_scene_hierarchy","arguments":{}}}
 ```
 
-Available tools: `get_scene_hierarchy`, `spawn_primitive`, `transform_object`,
-`create_custom_mesh`, `modify_mesh`, `apply_material`, `generate_procedural_texture`,
-`undo`, `redo`. Each line of stdout is one compact JSON-RPC response; logs go to stderr.
+### Tool groups
+
+- **Measure**: `get_scene_hierarchy`, `get_object_info`, `get_scene_info`, `get_viewport_info`, `get_mesh_topology`, `get_modeling_guide`
+- **Build**: `spawn_primitive`, `create_custom_mesh`, `create_mesh_from_faces`, `build_model`, `duplicate_node`
+- **Blender-style topology**: `extrude_faces`, `inset_faces`, `weld_vertices`, `flip_normals`, `bevel_mesh`
+- **Modifiers**: `apply_modifier` (mirror, array, solidify, smooth, triangulate, subdivide, extrude, recalculate normals), `modify_mesh`, `set_dimensions`
+- **Materials**: `apply_material`, `set_material_preset`, `generate_procedural_texture`
+- **Scene**: `transform_object`, `rename_object`, `delete_object`, `select_object`, `set_object_visibility`, `clear_scene`, `create_light`, `set_light`
+- **Camera / rendering**: `set_camera`, `focus_selection`, `render_viewport_snapshot`
+- **History**: `undo`, `redo`
+
+Agents should call `get_modeling_guide` first. It documents the Y-up unit-primitive contract,
+world-space bounds readback, ground-contact checks, and the Blender-style topology workflow
+(`create_mesh_from_faces` → `get_mesh_topology` → `extrude_faces` / `inset_faces`).
+Each line of stdout is one compact JSON-RPC response; logs go to stderr.
+
+## Releases
+
+Prebuilt Windows and Linux binaries are published at
+https://github.com/awdasddawsdsadwa-stack/e/releases (latest: `v0.2.0`).
 
 ## Dynamic GPU adaptation
 
@@ -65,9 +82,10 @@ drivers rather than switching to an unmaintained WGPU-based GUI crate.
 
 ## Roadmap
 
-- **Phase 1** (current): OpenGL 3.3 window, orbit/pan/zoom camera, grid floor, egui shell
-  (Outliner / Inspector / Timeline), undo/redo foundation, stdio MCP server with
-  `spawn_primitive`, `transform_object` and `get_scene_hierarchy`.
-- **Phase 2** (current): Custom meshes, auto-UV box projection, image/procedural textures, shading modes.
+- **Phase 1** ✅: OpenGL 3.3 window, orbit/pan/zoom camera, grid floor, egui shell, undo/redo, stdio MCP server.
+- **Phase 2** ✅: Custom meshes, auto-UV box projection, image/procedural textures, shading modes,
+  world bounds + ground readback, Blender-style tools, multi-angle screenshots. Released as `v0.2.0`.
+- **Phase 2.5** (current): Real topology editing (create from faces, extrude/inset faces, weld, bevel)
+  so agents model like Blender instead of stacking primitives.
 - **Phase 3**: Armatures, bones, auto-skinning, pose mode.
-- **Phase 4**: Keyframe timeline, glTF/GLB import/export, viewport snapshot feedback.
+- **Phase 4**: Keyframe timeline, glTF/GLB import/export (viewport snapshots already shipped).

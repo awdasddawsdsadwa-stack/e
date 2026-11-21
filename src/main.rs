@@ -20,6 +20,7 @@ use render::Renderer;
 use scene::{History, LightType, Material, MeshData, NodeId, NodeKind, OrbitCamera, PrimitiveKind, Scene, TextureData, Transform};
 use serde_json::{json, Value};
 use texture::{Pattern as TexturePattern, TextureOptions};
+use std::collections::HashSet;
 use three_d::*;
 use tokio::sync::oneshot;
 use ui::UiState;
@@ -804,6 +805,141 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
             }))
         }
 
+        "create_mesh_from_faces" => {
+            let Some(vertices) = parse_vec3_array(command.params.get("vertices")) else {
+                return_fail(command, "'vertices' must be an array of [x,y,z]");
+                return;
+            };
+            let Some(faces) = parse_faces(command.params.get("faces")) else {
+                return_fail(command, "'faces' must be an array of index arrays");
+                return;
+            };
+            let mesh = match mesh_ops::from_faces(&vertices, &faces) {
+                Ok(mesh) => mesh,
+                Err(message) => {
+                    return_fail(command, &message);
+                    return;
+                }
+            };
+            let vertex_count = mesh.positions.len();
+            let triangle_count = mesh.indices.len() / 3;
+            let name = command.params.get("name").and_then(Value::as_str).map(str::to_string);
+            let material = Material {
+                base_color: parse_array4(command.params.get("color")).unwrap_or([0.72, 0.74, 0.78, 1.0]),
+                roughness: command.params.get("roughness").and_then(Value::as_f64).unwrap_or(0.75) as f32,
+                metallic: command.params.get("metallic").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                ..Default::default()
+            };
+            history.push(scene);
+            let id = scene.create_custom_mesh(name, mesh, Some(material));
+            Ok(json!({
+                "id": id,
+                "name": scene.node(id).map(|n| n.name.clone()).unwrap_or_default(),
+                "vertices": vertex_count,
+                "triangles": triangle_count,
+                "bounds": scene.node(id).and_then(|n| n.world_bounds().map(|(_, _, size)| size)),
+            }))
+        }
+
+        "get_mesh_topology" => {
+            let Some(id) = resolve_id(scene, &command.params) else {
+                return_fail(command, "Mesh not found");
+                return;
+            };
+            let limit = command.params.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
+            let Some(mesh) = scene.mesh(id) else {
+                return_fail(command, "Node is not a mesh");
+                return;
+            };
+            let mut edges = HashSet::new();
+            for triangle in mesh.indices.chunks_exact(3) {
+                for pair in [(triangle[0], triangle[1]), (triangle[1], triangle[2]), (triangle[2], triangle[0])] {
+                    edges.insert(if pair.0 < pair.1 { pair } else { (pair.1, pair.0) });
+                }
+            }
+            let mut triangles = Vec::new();
+            for (face, chunk) in mesh.indices.chunks_exact(3).take(limit).enumerate() {
+                let corners: Vec<[f32; 3]> = chunk
+                    .iter()
+                    .filter_map(|index| mesh.positions.get(*index as usize).copied())
+                    .collect();
+                triangles.push(json!({ "face": face, "indices": chunk, "positions": corners }));
+            }
+            Ok(json!({
+                "id": id,
+                "vertices": mesh.positions.len(),
+                "triangles": mesh.indices.len() / 3,
+                "edges": edges.len(),
+                "faces": triangles,
+            }))
+        }
+
+        "extrude_faces" | "inset_faces" => {
+            let Some(id) = resolve_id(scene, &command.params) else {
+                return_fail(command, "Mesh not found");
+                return;
+            };
+            let Some(faces) = parse_faces_as_vec(command.params.get("faces")) else {
+                return_fail(command, "'faces' must be an array of triangle indices");
+                return;
+            };
+            let extruding = command.method == "extrude_faces";
+            let key = if extruding { "distance" } else { "amount" };
+            let Some(value) = command.params.get(key).and_then(Value::as_f64) else {
+                return_fail(command, &format!("'{key}' must be a number"));
+                return;
+            };
+            let value = value as f32;
+            history.push(scene);
+            let outcome = match scene.mesh_mut(id) {
+                Some(mesh) if extruding => mesh_ops::extrude_faces(mesh, &faces, value),
+                Some(mesh) => mesh_ops::inset_faces(mesh, &faces, value),
+                None => Err("Node is not a mesh".into()),
+            };
+            match outcome {
+                Ok(()) => {
+                    scene.revision += 1;
+                    Ok(json!({
+                        "id": id,
+                        "operation": command.method,
+                        "vertices": scene.mesh(id).map(|m| m.positions.len()).unwrap_or(0),
+                        "triangles": scene.mesh(id).map(|m| m.indices.len() / 3).unwrap_or(0),
+                        "bounds": scene.node(id).and_then(|n| n.world_bounds().map(|(_, _, size)| size)),
+                    }))
+                }
+                Err(message) => Err(message),
+            }
+        }
+
+        "weld_vertices" | "flip_normals" | "bevel_mesh" => {
+            let Some(id) = resolve_id(scene, &command.params) else {
+                return_fail(command, "Mesh not found");
+                return;
+            };
+            let value = command.params.get("epsilon").or_else(|| command.params.get("amount"))
+                .and_then(Value::as_f64).unwrap_or(0.01) as f32;
+            history.push(scene);
+            let outcome = match scene.mesh_mut(id) {
+                Some(mesh) if command.method == "weld_vertices" => mesh_ops::merge_by_distance(mesh, value),
+                Some(mesh) if command.method == "flip_normals" => mesh_ops::flip_normals(mesh),
+                Some(mesh) => mesh_ops::bevel(mesh, value),
+                None => Err("Node is not a mesh".into()),
+            };
+            match outcome {
+                Ok(()) => {
+                    scene.revision += 1;
+                    Ok(json!({
+                        "id": id,
+                        "operation": command.method,
+                        "vertices": scene.mesh(id).map(|m| m.positions.len()).unwrap_or(0),
+                        "triangles": scene.mesh(id).map(|m| m.indices.len() / 3).unwrap_or(0),
+                        "bounds": scene.node(id).and_then(|n| n.world_bounds().map(|(_, _, size)| size)),
+                    }))
+                }
+                Err(message) => Err(message),
+            }
+        }
+
         "get_scene_info" => {
             let fields: Vec<String> = command
                 .params
@@ -1260,6 +1396,12 @@ fn resolve_id(scene: &Scene, params: &Value) -> Option<NodeId> {
 
 const MODELING_GUIDE: &str = "\
 FORGE MODELING GUIDE — Y is up, X/Z are the ground plane, 1 unit = 1 metre.\n\
+BLENDER-STYLE TOPOLOGY: for anything more complex than a simple prop, build a real mesh with\n\
+create_mesh_from_faces (explicit vertices + polygon faces) instead of stacking boxes and cylinders.\n\
+That tool behaves like bmesh.from_pydata: faces are vertex-index lists and are triangulated for you.\n\
+Then use get_mesh_topology to find triangle face indices, and edit with extrude_faces,\n\
+inset_faces, weld_vertices, flip_normals and bevel_mesh. Stacked primitives look like Roblox;\n\
+topology editing looks like Blender. Reserve spawn_primitive for wheels, bolts and simple props.\n\
 PRIMITIVE LOCAL DIMENSIONS (before scale):\n\
 - cube: 1 x 1 x 1, centred at origin (-0.5..0.5 on each axis)\n\
 - sphere: diameter 1\n\
@@ -1312,6 +1454,27 @@ fn parse_vec2_array(value: Option<&Value>) -> Option<Vec<[f32; 2]>> {
         out.push([pair[0].as_f64()? as f32, pair[1].as_f64()? as f32]);
     }
     Some(out)
+}
+
+fn parse_faces(value: Option<&Value>) -> Option<Vec<Vec<usize>>> {
+    value?
+        .as_array()?
+        .iter()
+        .map(|face| {
+            face.as_array()?
+                .iter()
+                .map(|index| index.as_u64().map(|value| value as usize))
+                .collect()
+        })
+        .collect()
+}
+
+fn parse_faces_as_vec(value: Option<&Value>) -> Option<Vec<usize>> {
+    value?
+        .as_array()?
+        .iter()
+        .map(|index| index.as_u64().map(|value| value as usize))
+        .collect()
 }
 
 fn parse_u32_array(value: Option<&Value>) -> Option<Vec<u32>> {
