@@ -1,7 +1,7 @@
 //! three-d rendering layer. Everything here targets the OpenGL 3.3 Core
 //! context that three-d creates by default (its shaders are `#version 330 core`).
 
-use crate::scene::{NodeKind, Scene};
+use crate::scene::{NodeKind, Scene, TextureData as SceneTexture};
 use crate::ui::ShadingMode;
 use three_d::*;
 
@@ -58,29 +58,46 @@ impl Renderer {
         self.selection.clear();
 
         for node in &scene.nodes {
-            let (mesh, color) = match &node.kind {
-                NodeKind::Mesh { mesh, color, .. } if node.visible => (mesh, *color),
+            let (mesh, material) = match &node.kind {
+                NodeKind::Mesh { mesh, material, .. } if node.visible => (mesh, material),
                 _ => continue,
             };
             let cpu = cpu_mesh_from(mesh, &node.transform.matrix());
-            let srgba = srgba(&color);
+            let srgba = srgba(&material.base_color);
 
             match shading {
                 ShadingMode::Lit => {
-                    let material = PhysicalMaterial::new_opaque(
+                    let mut physical = PhysicalMaterial::new_opaque(
                         &self.context,
                         &CpuMaterial {
                             albedo: srgba,
-                            roughness: 0.75,
-                            metallic: 0.0,
+                            roughness: material.roughness,
+                            metallic: material.metallic,
                             ..Default::default()
                         },
                     );
-                    self.lit.push(Gm::new(Mesh::new(&self.context, &cpu), material));
+                    if let Some(tex) = &material.albedo {
+                        physical.albedo_texture = Some(texture_ref(&self.context, tex, true));
+                    }
+                    if let Some(tex) = &material.roughness_map {
+                        physical.metallic_roughness_texture =
+                            Some(texture_ref(&self.context, tex, false));
+                    }
+                    if let Some(tex) = &material.normal_map {
+                        physical.normal_texture = Some(texture_ref(&self.context, tex, false));
+                    }
+                    self.lit.push(Gm::new(Mesh::new(&self.context, &cpu), physical));
                 }
                 ShadingMode::Unlit => {
-                    let material = ColorMaterial { color: srgba, ..Default::default() };
-                    self.unlit.push(Gm::new(Mesh::new(&self.context, &cpu), material));
+                    let unlit = ColorMaterial {
+                        color: srgba,
+                        texture: material
+                            .albedo
+                            .as_ref()
+                            .map(|tex| texture_ref(&self.context, tex, true)),
+                        ..Default::default()
+                    };
+                    self.unlit.push(Gm::new(Mesh::new(&self.context, &cpu), unlit));
                 }
                 ShadingMode::Wireframe => {
                     self.wires.push(Wireframe::new_from_cpu_mesh(&self.context, &cpu, 1.0, srgba));
@@ -181,6 +198,22 @@ fn srgba(color: &[f32; 4]) -> Srgba {
         (color[2].clamp(0.0, 1.0) * 255.0) as u8,
         (color[3].clamp(0.0, 1.0) * 255.0) as u8,
     )
+}
+
+/// Turn a CPU RGBA8 texture into a GPU texture reference for a material.
+/// Colour/albedo textures are converted to linear sRGB; data maps are not.
+fn texture_ref(context: &Context, tex: &SceneTexture, srgb: bool) -> Texture2DRef {
+    let mut cpu = CpuTexture {
+        name: tex.name.clone(),
+        data: TextureData::RgbaU8(tex.pixels.clone()),
+        width: tex.width,
+        height: tex.height,
+        ..Default::default()
+    };
+    if srgb {
+        cpu.data.to_linear_srgb();
+    }
+    Texture2DRef::from_cpu_texture(context, &cpu)
 }
 
 fn cpu_mesh_from(data: &crate::scene::MeshData, transform: &glam::Mat4) -> CpuMesh {

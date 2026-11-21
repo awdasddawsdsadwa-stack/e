@@ -1,7 +1,7 @@
 //! Minimalist Blender-style editor shell built with the egui version that
 //! three-d re-exports (`three_d::egui`).
 
-use crate::scene::{History, NodeKind, OrbitCamera, Scene, Transform};
+use crate::scene::{History, Material, NodeKind, OrbitCamera, PrimitiveKind, Scene, Transform};
 use three_d::egui::{self, Button, Color32, DragValue, Panel, Ui};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -65,11 +65,12 @@ pub fn draw_ui(
     _camera: &mut OrbitCamera,
     ui_state: &mut UiState,
     mcp_connected: bool,
+    gpu_summary: &str,
 ) {
     let ctx = root_ui.ctx();
     handle_shortcuts(ctx, scene, history, ui_state);
 
-    top_bar(root_ui, scene, history, ui_state, mcp_connected);
+    top_bar(root_ui, scene, history, ui_state, mcp_connected, gpu_summary);
 
     // One undo snapshot per frame for any mutation coming from the panels.
     // Captured after the top bar because Undo/Redo buttons mutate history there.
@@ -120,6 +121,7 @@ fn top_bar(
     history: &mut History,
     state: &mut UiState,
     mcp_connected: bool,
+    gpu_summary: &str,
 ) {
     Panel::top("top_bar").show_inside(root_ui, |ui| {
         ui.horizontal_wrapped(|ui| {
@@ -170,6 +172,7 @@ fn top_bar(
                     (Color32::from_rgb(220, 90, 90), "MCP idle")
                 };
                 ui.label(egui::RichText::new(label).color(dot).small());
+                ui.label(egui::RichText::new(gpu_summary).small().weak());
                 ui.label(egui::RichText::new(&state.status).small().weak());
             });
         });
@@ -239,8 +242,8 @@ fn inspector(root_ui: &mut Ui, scene: &mut Scene) {
             let mut name = node.name.clone();
             let kind_label = kind_name(&node.kind).to_string();
             let mut transform = node.transform;
-            let mesh_info = match &node.kind {
-                NodeKind::Mesh { color, primitive, .. } => Some((*color, *primitive)),
+            let mesh_info: Option<(Material, Option<PrimitiveKind>)> = match &node.kind {
+                NodeKind::Mesh { material, primitive, .. } => Some((material.clone(), *primitive)),
                 _ => None,
             };
             let light_info = match &node.kind {
@@ -267,15 +270,18 @@ fn inspector(root_ui: &mut Ui, scene: &mut Scene) {
                 }
             });
 
-            if let Some((color, primitive)) = mesh_info {
+            if let Some((material, primitive)) = mesh_info {
                 ui.collapsing("Material", |ui| {
-                    let mut c = color;
+                    let mut color = material.base_color;
+                    let mut roughness = material.roughness;
+                    let mut metallic = material.metallic;
+
                     ui.horizontal(|ui| {
                         ui.label("Base color");
                         for (i, label) in ["R", "G", "B", "A"].iter().enumerate() {
                             ui.label(*label);
                             ui.add(
-                                DragValue::new(&mut c[i])
+                                DragValue::new(&mut color[i])
                                     .speed(0.01)
                                     .range(0.0..=1.0)
                                     .fixed_decimals(2),
@@ -283,12 +289,20 @@ fn inspector(root_ui: &mut Ui, scene: &mut Scene) {
                         }
                     });
                     let preview = Color32::from_rgba_premultiplied(
-                        (c[0].clamp(0.0, 1.0) * 255.0) as u8,
-                        (c[1].clamp(0.0, 1.0) * 255.0) as u8,
-                        (c[2].clamp(0.0, 1.0) * 255.0) as u8,
-                        (c[3].clamp(0.0, 1.0) * 255.0) as u8,
+                        (color[0].clamp(0.0, 1.0) * 255.0) as u8,
+                        (color[1].clamp(0.0, 1.0) * 255.0) as u8,
+                        (color[2].clamp(0.0, 1.0) * 255.0) as u8,
+                        (color[3].clamp(0.0, 1.0) * 255.0) as u8,
                     );
                     ui.colored_label(preview, "■ RGBA preview");
+
+                    ui.horizontal(|ui| {
+                        ui.label("Roughness");
+                        ui.add(DragValue::new(&mut roughness).speed(0.01).range(0.0..=1.0));
+                        ui.label("Metallic");
+                        ui.add(DragValue::new(&mut metallic).speed(0.01).range(0.0..=1.0));
+                    });
+
                     if let Some(kind) = primitive {
                         ui.label(
                             egui::RichText::new(format!("Primitive: {}", kind.as_str()))
@@ -296,8 +310,37 @@ fn inspector(root_ui: &mut Ui, scene: &mut Scene) {
                                 .weak(),
                         );
                     }
-                    if c != color {
-                        let _ = scene.set_material_color(id, c);
+                    for (label, texture) in [
+                        ("Albedo", &material.albedo),
+                        ("Roughness", &material.roughness_map),
+                        ("Normal", &material.normal_map),
+                    ] {
+                        match texture {
+                            Some(tex) => ui.label(
+                                egui::RichText::new(format!(
+                                    "{label}: {} ({}x{})",
+                                    tex.name, tex.width, tex.height
+                                ))
+                                .small(),
+                            ),
+                            None => ui.label(
+                                egui::RichText::new(format!("{label}: none")).small().weak(),
+                            ),
+                        };
+                    }
+
+                    if color != material.base_color
+                        || (roughness - material.roughness).abs() > f32::EPSILON
+                        || (metallic - material.metallic).abs() > f32::EPSILON
+                    {
+                        {
+                            if let Some(slot) = scene.material_mut(id) {
+                                slot.base_color = color;
+                                slot.roughness = roughness;
+                                slot.metallic = metallic;
+                            }
+                        }
+                        scene.revision += 1;
                     }
                 });
             }

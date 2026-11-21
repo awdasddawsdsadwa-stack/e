@@ -115,6 +115,64 @@ impl MeshData {
     }
 }
 
+/// CPU-side RGBA8 texture. Always downscaled to <= 1024x1024 before GPU upload.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextureData {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// Row-major RGBA8 pixels, top-left origin.
+    pub pixels: Vec<[u8; 4]>,
+}
+
+impl TextureData {
+    pub fn summary_json(&self) -> Value {
+        json!({
+            "name": self.name,
+            "width": self.width,
+            "height": self.height,
+            "channels": 4,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Material {
+    /// Linear RGBA base colour multiplier.
+    pub base_color: [f32; 4],
+    pub roughness: f32,
+    pub metallic: f32,
+    pub albedo: Option<TextureData>,
+    pub roughness_map: Option<TextureData>,
+    pub normal_map: Option<TextureData>,
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Self {
+            base_color: [0.72, 0.74, 0.78, 1.0],
+            roughness: 0.75,
+            metallic: 0.0,
+            albedo: None,
+            roughness_map: None,
+            normal_map: None,
+        }
+    }
+}
+
+impl Material {
+    pub fn summary_json(&self) -> Value {
+        json!({
+            "base_color": self.base_color,
+            "roughness": self.roughness,
+            "metallic": self.metallic,
+            "albedo": self.albedo.as_ref().map(TextureData::summary_json),
+            "roughness_map": self.roughness_map.as_ref().map(TextureData::summary_json),
+            "normal_map": self.normal_map.as_ref().map(TextureData::summary_json),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PrimitiveKind {
     Cube,
@@ -162,8 +220,7 @@ pub enum NodeKind {
     Empty,
     Mesh {
         mesh: MeshData,
-        /// Linear RGBA base colour.
-        color: [f32; 4],
+        material: Material,
         primitive: Option<PrimitiveKind>,
     },
     Camera,
@@ -207,12 +264,11 @@ impl SceneNode {
         });
         match &self.kind {
             NodeKind::Empty | NodeKind::Camera => base,
-            NodeKind::Mesh { mesh, color, primitive } => {
+            NodeKind::Mesh { mesh, material, primitive } => {
                 let mut v = base;
-                v["material"] = json!({
-                    "base_color": color,
-                    "primitive": primitive.map(|p| p.as_str()),
-                });
+                let mut mat = material.summary_json();
+                mat["primitive"] = json!(primitive.map(|p| p.as_str()));
+                v["material"] = mat;
                 v["geometry"] = json!({
                     "vertices": mesh.positions.len(),
                     "triangles": mesh.indices.len() / 3,
@@ -345,7 +401,14 @@ impl Scene {
             parent: None,
             transform: Transform { position: position.unwrap_or([0.0; 3]), ..Default::default() },
             visible: true,
-            kind: NodeKind::Mesh { mesh, color: color.unwrap_or([0.72, 0.74, 0.78, 1.0]), primitive: Some(kind) },
+            kind: NodeKind::Mesh {
+                mesh,
+                material: Material {
+                    base_color: color.unwrap_or([0.72, 0.74, 0.78, 1.0]),
+                    ..Default::default()
+                },
+                primitive: Some(kind),
+            },
         };
         self.nodes.push(node);
         self.selected = Some(id);
@@ -438,17 +501,67 @@ impl Scene {
     }
 
     pub fn set_material_color(&mut self, id: NodeId, color: [f32; 4]) -> bool {
-        match self.node_mut(id) {
-            Some(n) => match &mut n.kind {
-                NodeKind::Mesh { color: c, .. } => {
-                    *c = color;
-                    self.revision += 1;
-                    true
-                }
-                _ => false,
-            },
+        match self.material_mut(id) {
+            Some(material) => {
+                material.base_color = color;
+                self.revision += 1;
+                true
+            }
             None => false,
         }
+    }
+
+    pub fn material_mut(&mut self, id: NodeId) -> Option<&mut Material> {
+        match self.node_mut(id) {
+            Some(n) => match &mut n.kind {
+                NodeKind::Mesh { material, .. } => Some(material),
+                _ => None,
+            },
+            None => None,
+        }
+    }
+
+    pub fn mesh_mut(&mut self, id: NodeId) -> Option<&mut MeshData> {
+        match self.node_mut(id) {
+            Some(n) => match &mut n.kind {
+                NodeKind::Mesh { mesh, .. } => Some(mesh),
+                _ => None,
+            },
+            None => None,
+        }
+    }
+
+    pub fn mesh(&self, id: NodeId) -> Option<&MeshData> {
+        match self.node(id) {
+            Some(n) => match &n.kind {
+                NodeKind::Mesh { mesh, .. } => Some(mesh),
+                _ => None,
+            },
+            None => None,
+        }
+    }
+
+    /// Add a mesh built from raw vertex/index buffers.
+    pub fn create_custom_mesh(
+        &mut self,
+        name: Option<String>,
+        mesh: MeshData,
+        material: Option<Material>,
+    ) -> NodeId {
+        let id = self.next_id;
+        self.next_id += 1;
+        let label = name.unwrap_or_else(|| format!("Mesh.{}", id));
+        self.nodes.push(SceneNode {
+            id,
+            name: label,
+            parent: None,
+            transform: Transform::default(),
+            visible: true,
+            kind: NodeKind::Mesh { mesh, material: material.unwrap_or_default(), primitive: None },
+        });
+        self.selected = Some(id);
+        self.revision += 1;
+        id
     }
 
     pub fn delete_node(&mut self, id: NodeId) -> bool {
