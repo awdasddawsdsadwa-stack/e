@@ -165,7 +165,7 @@ fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "get_scene_hierarchy",
-            "description": "Return the full scene graph: every node with its transform, material, geometry summary, visibility and parent. The current timeline state is available both at the top-level 'timeline' key and at 'scene.timeline'. Use this to verify what is in the scene.",
+            "description": "Return the full scene graph with every node's transform, material, geometry summary, visibility, parent, and WORLD-SPACE axis-aligned bounds (min/max/size for each mesh, plus an overall scene bounds). The timeline state is at both 'timeline' and 'scene.timeline'. Use the bounds to verify real 3D size and depth before declaring a model complete.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -174,7 +174,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "spawn_primitive",
-            "description": "Spawn a procedural primitive mesh into the scene and select it. The new node becomes the current selection, so later tools may omit id/name to target it.",
+            "description": "Spawn a primitive and select it. GEOMETRY CONTRACT: coordinates are Y-up (X/Z are the ground plane). Unit primitives: cube = 1x1x1 centered at origin (-0.5..0.5 on each axis); sphere = diameter 1; cylinder = radius 0.5 and height 1 along Y; cone = radius 0.5, height 1; plane = 1x1 on XZ; torus = major radius 0.5, tube 0.18. `position` is the object's CENTER. `scale` MULTIPLIES these local dimensions, e.g. scale [4,0.6,1] makes a 4x0.6x1 box. A `plane` has ZERO thickness — for solid panels use a thin cube (e.g. scale [2,0.05,1]) or apply the solidify modifier. Always set all three scale components to give an object real depth, then verify with get_object_info bounds.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -203,7 +203,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "transform_object",
-            "description": "Move, rotate or scale an existing node. Identify the node by numeric id or by exact (case-insensitive) name. Only the supplied fields are changed.",
+            "description": "Move, rotate or scale a node (by id or case-insensitive name). Y is up; X/Z are ground. `position` sets the object's CENTER. `scale` is multiplicative on the unit primitives (cube 1x1x1, cylinder radius 0.5 height 1, sphere diameter 1, cone radius 0.5 height 1, torus major 0.5 tube 0.18, plane 1x1 on XZ) — e.g. scale [4,0.6,1] is a 4x0.6x1 box. `euler` is radians. Only supplied fields change; call get_object_info afterwards to confirm world-space bounds.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -225,7 +225,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "create_custom_mesh",
-            "description": "Create a mesh from raw vertex buffers. Supply positions ([[x,y,z], ...]) and triangle indices (flat list of vertex indices, length divisible by 3). Normals and UVs are optional. With auto_uv=true, box-projection UVs are generated automatically.",
+            "description": "Create a mesh from raw vertex buffers. IMPORTANT: coordinates are LOCAL to the node, Y-up, and must have real thickness in all three axes unless a flat plane is intended. Do not stack several zero-thickness planes to fake a solid. Supply positions ([[x,y,z],...]) spanning X, Y and Z, and triangle indices (flat list, length divisible by 3). Normals/UVs are optional; auto_uv=true generates box-projection UVs and auto-generated normals are added when missing. Verify the result with get_object_info bounds (size must be non-zero on all three axes for a solid).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -323,14 +323,19 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "width": { "type": "integer", "description": "Pixel width, clamped to 64..1024 (default 512)." },
-                    "height": { "type": "integer", "description": "Pixel height, clamped to 64..1024 (default = width)." }
+                    "height": { "type": "integer", "description": "Pixel height, clamped to 64..1024 (default = width)." },
+                    "view": {
+                        "type": "string",
+                        "enum": ["current", "front", "right", "top", "three_quarter"],
+                        "description": "Optional camera preset for a multi-angle check (default current)."
+                    }
                 },
                 "additionalProperties": false
             }
         }),
         json!({
             "name": "build_model",
-            "description": "Build a whole model in ONE call from a list of parts. Prefer this over many separate spawn calls: it is one undo step and much faster. Each part may include a procedural texture.",
+            "description": "Build a whole model in ONE call from a list of parts (one undo step). Each part uses the unit-primitive contract: cube 1x1x1, cylinder radius 0.5 height 1 along Y, sphere diameter 1, cone radius 0.5 height 1, plane 1x1 on XZ, torus major 0.5 tube 0.18. `position` is the CENTER, `scale` multiplies local dimensions (so [4,0.6,1] = a 4x0.6x1 box), `euler` is radians, Y-up with X/Z ground. Give every solid non-zero depth on all three axes; do not fake solids with stacked planes. After building, call get_scene_hierarchy and check bounds.size on each part.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -403,8 +408,48 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "get_scene_info",
+            "description": "Compact TEXT readback for measuring a scene: for each object reports world location, bounding-box size, ground contact (on ground / floating / below ground), rotation in DEGREES and scale. Use this to judge size and placement instead of guessing from a screenshot. Optional fields filter what is returned.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "fields": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["location", "size", "ground", "rotation", "scale", "material"] },
+                        "description": "Which facts to include (default: all)."
+                    },
+                    "limit": { "type": "integer", "description": "Max objects to return (default 50)." }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "get_modeling_guide",
+            "description": "On-demand guide for this editor: coordinate system, exact unit-primitive dimensions, how to compute scale from a desired size, ground-contact rules, and the self-check procedure for building solid 3D models.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": "set_dimensions",
+            "description": "Set an object's world-space bounding-box size directly, e.g. size [4,0.6,1] for a 4x0.6x1 box. Avoids guessing scale multipliers. Computes scale from the mesh's local bounds; Y-up with X/Z ground. Returns the resulting bounds.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "size": {
+                        "type": "array",
+                        "items": { "type": "number" },
+                        "minItems": 3, "maxItems": 3,
+                        "description": "Desired world-space extents [X, Y, Z]."
+                    }
+                },
+                "required": ["size"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "get_object_info",
-            "description": "Get full details for one node by id or name: transform, visibility, material, geometry statistics and light properties.",
+            "description": "Get full details for one node by id or name: transform, visibility, material, geometry statistics, light properties, and WORLD-Space bounds (min/max/size). Use bounds.size to check that a mesh has real depth on all axes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -468,7 +513,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "apply_modifier",
-            "description": "Blender-style mesh modifiers: mirror across an axis, array copies, solidify, smooth, triangulate, subdivide, extrude or recalculate normals.",
+            "description": "Blender-style mesh modifiers: mirror across an axis, array copies, solidify (gives a flat mesh real thickness — use it on planes), smooth, triangulate, subdivide, extrude or recalculate normals. Check bounds after applying.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -589,6 +634,9 @@ async fn call_tool(params: Value, tx: &CommandSender) -> Result<Value, (i64, Str
         "clear_scene",
         "duplicate_node",
         "set_camera",
+        "get_scene_info",
+        "get_modeling_guide",
+        "set_dimensions",
         "get_object_info",
         "delete_object",
         "rename_object",

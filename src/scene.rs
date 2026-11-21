@@ -252,7 +252,65 @@ pub struct SceneNode {
     pub kind: NodeKind,
 }
 
+/// Human-readable placement status derived from the lowest point of a mesh.
+pub fn ground_status(min_y: f32) -> String {
+    if min_y.abs() <= 0.01 {
+        "on ground".to_string()
+    } else if min_y > 0.0 {
+        format!("floating {min_y:.2}")
+    } else {
+        format!("below ground by {:.2}", -min_y)
+    }
+}
+
 impl SceneNode {
+    /// World-space axis-aligned bounding box of a mesh node: (min, max, size).
+    pub fn world_bounds(&self) -> Option<([f32; 3], [f32; 3], [f32; 3])> {
+        let mesh = match &self.kind {
+            NodeKind::Mesh { mesh, .. } => mesh,
+            _ => return None,
+        };
+        let matrix = self.transform.matrix();
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for point in &mesh.positions {
+            let world = matrix.transform_point3(Vec3::from(*point));
+            let xyz = [world.x, world.y, world.z];
+            for axis in 0..3 {
+                min[axis] = min[axis].min(xyz[axis]);
+                max[axis] = max[axis].max(xyz[axis]);
+            }
+        }
+        if mesh.positions.is_empty() {
+            return None;
+        }
+        let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+        Some((min, max, size))
+    }
+
+    pub fn bounds_json(&self) -> Value {
+        match self.world_bounds() {
+            Some((min, max, size)) => json!({
+                "min": min,
+                "max": max,
+                "size": size,
+                "center": [
+                    (min[0] + max[0]) * 0.5,
+                    (min[1] + max[1]) * 0.5,
+                    (min[2] + max[2]) * 0.5,
+                ],
+                "ground": ground_status(min[1]),
+                "corners": [
+                    [min[0], min[1], min[2]], [max[0], min[1], min[2]],
+                    [min[0], max[1], min[2]], [max[0], max[1], min[2]],
+                    [min[0], min[1], max[2]], [max[0], min[1], max[2]],
+                    [min[0], max[1], max[2]], [max[0], max[1], max[2]],
+                ],
+            }),
+            None => Value::Null,
+        }
+    }
+
     pub fn to_json(&self) -> Value {
         let base = json!({
             "id": self.id,
@@ -272,6 +330,7 @@ impl SceneNode {
                     "triangles": mesh.indices.len() / 3,
                     "primitive": primitive.map(|p| p.as_str()),
                 });
+                v["bounds"] = self.bounds_json();
                 v
             }
             NodeKind::Light { light_type, color, intensity } => {
@@ -583,6 +642,28 @@ impl Scene {
 
     pub fn hierarchy_json(&self) -> Value {
         let nodes: Vec<Value> = self.nodes.iter().map(|n| n.to_json()).collect();
+        let mut scene_min = [f32::INFINITY; 3];
+        let mut scene_max = [f32::NEG_INFINITY; 3];
+        let mut has_bounds = false;
+        for node in &self.nodes {
+            if let Some((min, max, _)) = node.world_bounds() {
+                has_bounds = true;
+                for axis in 0..3 {
+                    scene_min[axis] = scene_min[axis].min(min[axis]);
+                    scene_max[axis] = scene_max[axis].max(max[axis]);
+                }
+            }
+        }
+        let scene_bounds = if has_bounds {
+            json!({
+                "min": scene_min,
+                "max": scene_max,
+                "size": [scene_max[0] - scene_min[0], scene_max[1] - scene_min[1], scene_max[2] - scene_min[2]],
+            })
+        } else {
+            Value::Null
+        };
+
         let timeline = json!({
             "frame": self.timeline.frame,
             "frame_start": self.timeline.frame_start,
@@ -596,6 +677,7 @@ impl Scene {
                 "selected": self.selected,
                 "background": self.background,
                 "nodes": nodes,
+                "bounds": scene_bounds,
                 "timeline": timeline.clone(),
             },
             "timeline": timeline,

@@ -120,6 +120,31 @@ fn main() {
                         .and_then(Value::as_u64)
                         .unwrap_or(width as u64)
                         .clamp(64, 1024) as u32;
+                    let view = command
+                        .params
+                        .get("view")
+                        .and_then(Value::as_str)
+                        .unwrap_or("current")
+                        .to_string();
+                    match view.as_str() {
+                        "front" => {
+                            camera.yaw = 0.0;
+                            camera.pitch = 0.0;
+                        }
+                        "right" => {
+                            camera.yaw = std::f32::consts::FRAC_PI_2;
+                            camera.pitch = 0.0;
+                        }
+                        "top" => {
+                            camera.yaw = 0.0;
+                            camera.pitch = 1.45;
+                        }
+                        "three_quarter" => {
+                            camera.yaw = -0.9;
+                            camera.pitch = 0.35;
+                        }
+                        _ => {}
+                    }
                     pending_capture = Some((width, height, command.reply));
                 }
                 _ => handle_command(command, &mut scene, &mut history, texture_limit),
@@ -369,11 +394,25 @@ fn build_model(
         built.push(json!({
             "id": id,
             "name": scene.node(id).map(|n| n.name.clone()).unwrap_or_default(),
+            "bounds": scene.node(id).and_then(|n| n.world_bounds().map(|(_, _, size)| size)),
         }));
     }
 
+    let scene_bounds = {
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for node in &scene.nodes {
+            if let Some((lo, hi, _)) = node.world_bounds() {
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(lo[axis]);
+                    max[axis] = max[axis].max(hi[axis]);
+                }
+            }
+        }
+        json!({ "min": min, "max": max, "size": [max[0]-min[0], max[1]-min[1], max[2]-min[2]] })
+    };
     scene.revision += 1;
-    Ok(json!({ "count": built.len(), "parts": built }))
+    Ok(json!({ "count": built.len(), "parts": built, "scene_bounds": scene_bounds }))
 }
 
 fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History, texture_limit: u32) {
@@ -402,6 +441,7 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
                         "id": id,
                         "name": scene.node(id).map(|n| n.name.clone()).unwrap_or_default(),
                         "primitive": kind.as_str(),
+                        "bounds": scene.node(id).and_then(|n| n.world_bounds().map(|(_, _, size)| size)),
                     }))
                 }
                 None => Err(format!("Unknown primitive '{kind_name}'. Use cube, sphere, cylinder, cone, plane or torus.")),
@@ -480,6 +520,7 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
                 "vertices": vertex_count,
                 "triangles": triangle_count,
                 "auto_uv": auto_uv,
+                "bounds": scene.node(id).and_then(|n| n.world_bounds().map(|(_, _, size)| size)),
             }))
         }
 
@@ -563,6 +604,7 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
                         "operation": op,
                         "vertices": scene.mesh(id).map(|m| m.positions.len()).unwrap_or(0),
                         "triangles": scene.mesh(id).map(|m| m.indices.len() / 3).unwrap_or(0),
+                        "bounds": scene.node(id).and_then(|n| n.world_bounds().map(|(_, _, size)| size)),
                     }))
                 }
                 Err(message) => Err(message),
@@ -753,6 +795,128 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
             }))
         }
 
+        "get_scene_info" => {
+            let fields: Vec<String> = command
+                .params
+                .get("fields")
+                .and_then(Value::as_array)
+                .map(|array| {
+                    array
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_else(|| {
+                    ["location", "size", "ground", "rotation", "scale"]
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect()
+                });
+            let limit = command.params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
+            let wants = |name: &str| fields.iter().any(|field| field == name);
+            let mut objects = Vec::new();
+            for node in scene.nodes.iter().take(limit) {
+                let mut entry = json!({
+                    "name": node.name,
+                    "type": kind_label(&node.kind),
+                });
+                if wants("location") {
+                    entry["location"] = json!(node.transform.position);
+                }
+                if wants("rotation") {
+                    entry["rotation_deg"] = json!(node.transform.euler().map(f32::to_degrees));
+                }
+                if wants("scale") {
+                    entry["scale"] = json!(node.transform.scale);
+                }
+                if wants("size") || wants("ground") {
+                    match node.world_bounds() {
+                        Some((_, _, size)) => {
+                            if wants("size") {
+                                entry["size"] = json!(size);
+                            }
+                            if wants("ground") {
+                                entry["ground"] = json!(scene::ground_status(
+                                    node.world_bounds().map(|(min, _, _)| min[1]).unwrap_or(0.0)
+                                ));
+                            }
+                        }
+                        None => {
+                            if wants("size") {
+                                entry["size"] = Value::Null;
+                            }
+                            if wants("ground") {
+                                entry["ground"] = json!("no mesh");
+                            }
+                        }
+                    }
+                }
+                if wants("material") {
+                    entry["material"] = match &node.kind {
+                        NodeKind::Mesh { material, .. } => material.summary_json(),
+                        _ => Value::Null,
+                    };
+                }
+                objects.push(entry);
+            }
+            Ok(json!({
+                "node_count": scene.nodes.len(),
+                "objects": objects,
+            }))
+        }
+
+        "get_modeling_guide" => Ok(json!({ "guide": MODELING_GUIDE })),
+
+        "set_dimensions" => {
+            let Some(id) = resolve_id(scene, &command.params) else {
+                return_fail(command, "Node not found");
+                return;
+            };
+            let Some(size) = parse_array3(command.params.get("size")) else {
+                return_fail(command, "'size' must be [width, height, depth]");
+                return;
+            };
+            let Some(node) = scene.node(id).cloned() else {
+                return_fail(command, "Node not found");
+                return;
+            };
+            let local_size = match &node.kind {
+                NodeKind::Mesh { mesh, .. } => {
+                    if mesh.positions.is_empty() {
+                        return_fail(command, "Mesh has no vertices");
+                        return;
+                    }
+                    let mut min = [f32::INFINITY; 3];
+                    let mut max = [f32::NEG_INFINITY; 3];
+                    for point in &mesh.positions {
+                        for axis in 0..3 {
+                            min[axis] = min[axis].min(point[axis]);
+                            max[axis] = max[axis].max(point[axis]);
+                        }
+                    }
+                    [max[0] - min[0], max[1] - min[1], max[2] - min[2]]
+                }
+                _ => {
+                    return_fail(command, "Node is not a mesh");
+                    return;
+                }
+            };
+            let new_scale = [
+                if local_size[0].abs() > 1e-6 { size[0] / local_size[0] } else { 1.0 },
+                if local_size[1].abs() > 1e-6 { size[1] / local_size[1] } else { 1.0 },
+                if local_size[2].abs() > 1e-6 { size[2] / local_size[2] } else { 1.0 },
+            ];
+            history.push(scene);
+            scene.transform_object(id, None, None, Some(new_scale));
+            let bounds = scene.node(id).map(|node| node.bounds_json()).unwrap_or(Value::Null);
+            Ok(json!({
+                "id": id,
+                "size": size,
+                "scale": new_scale,
+                "bounds": bounds,
+            }))
+        }
+
         "get_object_info" => {
             let Some(id) = resolve_id(scene, &command.params) else {
                 return_fail(command, "Node not found");
@@ -919,6 +1083,7 @@ fn handle_command(command: AppCommand, scene: &mut Scene, history: &mut History,
                         "operation": op,
                         "vertices": scene.mesh(id).map(|m| m.positions.len()).unwrap_or(0),
                         "triangles": scene.mesh(id).map(|m| m.indices.len() / 3).unwrap_or(0),
+                        "bounds": scene.node(id).and_then(|n| n.world_bounds().map(|(_, _, size)| size)),
                     }))
                 }
                 Err(message) => Err(message),
@@ -1082,6 +1247,36 @@ fn resolve_id(scene: &Scene, params: &Value) -> Option<NodeId> {
         return scene.node_by_name(name).map(|n| n.id);
     }
     scene.selected
+}
+
+const MODELING_GUIDE: &str = "\
+FORGE MODELING GUIDE — Y is up, X/Z are the ground plane, 1 unit = 1 metre.\n\
+PRIMITIVE LOCAL DIMENSIONS (before scale):\n\
+- cube: 1 x 1 x 1, centred at origin (-0.5..0.5 on each axis)\n\
+- sphere: diameter 1\n\
+- cylinder: radius 0.5, height 1 along Y\n\
+- cone: radius 0.5, height 1 along Y\n\
+- torus: major radius 0.5, tube 0.18; lies flat in XZ with height 0.36\n\
+- plane: 1 x 1 on XZ with ZERO thickness — use a thin cube or the solidify modifier for solids\n\
+POSITION sets the object's CENTER. SCALE MULTIPLIES local dimensions: a desired world size\n\
+[w, h, d] means scale [w, h, d] for cube/sphere/cylinder/cone, and [w/1.36, h/0.36, d/1.36]\n\
+for torus. Prefer set_dimensions({size:[w,h,d]}) so the engine computes scale for you.\n\
+GROUND CONTACT: 'ground' in bounds is derived from the AABB's lowest point (min.y). To rest an\n\
+object on the ground, set its centre Y to half its height (a 4x0.6x1 box -> centre y=0.3).\n\
+SELF-CHECK PROCEDURE: 1) build with build_model or spawn_primitive; 2) call get_scene_info and\n\
+check every part's size and ground status; 3) call render_viewport_snapshot with views\n\
+'front', 'right', 'top' and 'three_quarter' to see it from several angles; 4) fix anything\n\
+floating, below ground, or zero-thickness; 5) finish with get_scene_hierarchy.\n\
+NEVER stack zero-thickness planes to fake a solid, leave parts floating, or guess scale\n\
+without reading back bounds. Use get_object_info to inspect one part in detail.\n";
+
+fn kind_label(kind: &NodeKind) -> &'static str {
+    match kind {
+        NodeKind::Empty => "Empty",
+        NodeKind::Mesh { .. } => "Mesh",
+        NodeKind::Camera => "Camera",
+        NodeKind::Light { .. } => "Light",
+    }
 }
 
 fn assign_texture(material: &mut Material, slot: &str, tex: TextureData) {
